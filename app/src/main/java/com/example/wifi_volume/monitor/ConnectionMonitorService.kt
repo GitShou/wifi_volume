@@ -32,6 +32,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class ConnectionMonitorService : Service() {
@@ -43,6 +44,7 @@ class ConnectionMonitorService : Service() {
     private lateinit var bluetoothStateResolver: BluetoothStateResolver
     private val ruleEvaluator = RuleEvaluator()
     private var pendingEvaluationJob: Job? = null
+    private var watchdogJob: Job? = null
 
     private var isNetworkCallbackRegistered = false
     private var isBluetoothReceiverRegistered = false
@@ -117,6 +119,14 @@ class ConnectionMonitorService : Service() {
             )
             isBluetoothReceiverRegistered = true
         }
+        if (watchdogJob == null) {
+            watchdogJob = serviceScope.launch {
+                while (isActive) {
+                    delay(WATCHDOG_INTERVAL_MS)
+                    requestRuleEvaluation(immediate = true)
+                }
+            }
+        }
 
         requestRuleEvaluation(immediate = true)
         return START_STICKY
@@ -130,6 +140,7 @@ class ConnectionMonitorService : Service() {
             unregisterReceiver(bluetoothReceiver)
         }
         pendingEvaluationJob?.cancel()
+        watchdogJob?.cancel()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -143,6 +154,7 @@ class ConnectionMonitorService : Service() {
                 delay(EVENT_STABILIZE_DELAY_MS)
             }
             val settings = settingsRepository.getSettings() ?: return@launch
+            val previousActiveRuleId = settingsRepository.getActiveRuleId()
             val connectionSnapshot = connectionStateResolver.resolveSnapshot()
             val activeRule = ruleEvaluator.resolveActiveRule(
                 settings = settings,
@@ -154,13 +166,19 @@ class ConnectionMonitorService : Service() {
             )
             val shouldApply = when (settings.reapplyMode) {
                 ReapplyMode.ALWAYS -> true
-                ReapplyMode.ON_CHANGE_ONLY -> settingsRepository.getActiveRuleId() != activeRule.id
+                ReapplyMode.ON_CHANGE_ONLY -> settingsRepository.getActiveRuleId() != activeRule.rule.id
             }
 
             if (shouldApply) {
-                volumeController.applyProfile(activeRule.volumeProfile)
+                volumeController.applyProfile(activeRule.rule.volumeProfile)
             }
-            settingsRepository.setActiveRuleState(activeRule)
+            settingsRepository.setActiveRuleState(activeRule.rule.id, activeRule.displayLabel)
+            if (settings.notifyOnRuleChange &&
+                previousActiveRuleId != null &&
+                previousActiveRuleId != activeRule.rule.id
+            ) {
+                showRuleChangeNotification(activeRule.displayLabel)
+            }
         }
     }
 
@@ -184,17 +202,37 @@ class ConnectionMonitorService : Service() {
 
     private fun createNotificationChannel() {
         val notificationManager = getSystemService(NotificationManager::class.java)
-        val channel = NotificationChannel(
+        val monitorChannel = NotificationChannel(
             NOTIFICATION_CHANNEL_ID,
             getString(R.string.notification_channel_name),
             NotificationManager.IMPORTANCE_LOW,
         )
-        notificationManager.createNotificationChannel(channel)
+        val changeChannel = NotificationChannel(
+            CHANGE_NOTIFICATION_CHANNEL_ID,
+            getString(R.string.change_notification_channel_name),
+            NotificationManager.IMPORTANCE_DEFAULT,
+        )
+        notificationManager.createNotificationChannels(listOf(monitorChannel, changeChannel))
+    }
+
+    private fun showRuleChangeNotification(ruleLabel: String) {
+        getSystemService(NotificationManager::class.java).notify(
+            CHANGE_NOTIFICATION_ID,
+            NotificationCompat.Builder(this, CHANGE_NOTIFICATION_CHANNEL_ID)
+                .setContentTitle(getString(R.string.change_notification_title))
+                .setContentText(getString(R.string.change_notification_message, ruleLabel))
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setAutoCancel(true)
+                .build(),
+        )
     }
 
     private companion object {
         const val NOTIFICATION_CHANNEL_ID = "connection_monitor"
         const val NOTIFICATION_ID = 1001
+        const val CHANGE_NOTIFICATION_CHANNEL_ID = "rule_change"
+        const val CHANGE_NOTIFICATION_ID = 1002
         const val EVENT_STABILIZE_DELAY_MS = 1200L
+        const val WATCHDOG_INTERVAL_MS = 10_000L
     }
 }

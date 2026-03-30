@@ -13,6 +13,7 @@ import com.example.wifi_volume.model.RingerModeOption
 import com.example.wifi_volume.model.RuleCondition
 import com.example.wifi_volume.model.RuleConditionType
 import com.example.wifi_volume.model.RuleConfig
+import com.example.wifi_volume.model.RuleEvaluator
 import com.example.wifi_volume.model.VolumeProfile
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -65,10 +66,10 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
-    suspend fun setActiveRuleState(rule: RuleConfig) {
+    suspend fun setActiveRuleState(ruleId: String, label: String) {
         dataStore.edit { preferences ->
-            preferences[Keys.ACTIVE_RULE_ID] = rule.id
-            preferences[Keys.ACTIVE_RULE_LABEL] = rule.condition.label
+            preferences[Keys.ACTIVE_RULE_ID] = ruleId
+            preferences[Keys.ACTIVE_RULE_LABEL] = label
         }
     }
 
@@ -76,6 +77,19 @@ class SettingsRepository(private val context: Context) {
         preferences: Preferences,
         defaultProfile: VolumeProfile,
     ): AppSettings {
+        if (!hasLegacySettings(preferences)) {
+            return AppSettings(
+                rules = listOf(
+                    createFallbackRule(
+                        priority = DEFAULT_MOBILE_PRIORITY,
+                        profile = defaultProfile,
+                    ),
+                ),
+                reapplyMode = ReapplyMode.ON_CHANGE_ONLY,
+                notifyOnRuleChange = false,
+            )
+        }
+
         val bluetoothProfile = readLegacyProfile(
             mediaKey = LegacyKeys.BLUETOOTH_MEDIA,
             ringKey = LegacyKeys.BLUETOOTH_RING,
@@ -119,17 +133,23 @@ class SettingsRepository(private val context: Context) {
                     priority = preferences[LegacyKeys.WIFI_PRIORITY] ?: DEFAULT_WIFI_PRIORITY,
                     profile = wifiProfile,
                 ),
-                createRule(
-                    condition = RuleCondition(
-                        type = RuleConditionType.MOBILE_DEFAULT,
-                        label = LABEL_MOBILE_DEFAULT,
-                    ),
+                createFallbackRule(
                     priority = preferences[LegacyKeys.MOBILE_PRIORITY] ?: DEFAULT_MOBILE_PRIORITY,
                     profile = mobileProfile,
                 ),
             ),
             reapplyMode = decodeReapplyMode(preferences[LegacyKeys.REAPPLY_MODE]),
+            notifyOnRuleChange = false,
         )
+    }
+
+    private fun hasLegacySettings(preferences: Preferences): Boolean {
+        return listOf(
+            LegacyKeys.BLUETOOTH_MEDIA,
+            LegacyKeys.WIFI_MEDIA,
+            LegacyKeys.MOBILE_MEDIA,
+            LegacyKeys.REAPPLY_MODE,
+        ).any { key -> preferences.contains(key) }
     }
 
     private fun createRule(
@@ -139,9 +159,24 @@ class SettingsRepository(private val context: Context) {
     ): RuleConfig {
         return RuleConfig(
             id = UUID.randomUUID().toString(),
-            condition = condition,
+            name = condition.label,
             priority = priority,
+            conditions = listOf(condition),
             volumeProfile = profile,
+        )
+    }
+
+    private fun createFallbackRule(
+        priority: Int,
+        profile: VolumeProfile,
+    ): RuleConfig {
+        return RuleConfig(
+            id = UUID.randomUUID().toString(),
+            name = RuleEvaluator.FALLBACK_LABEL,
+            priority = priority,
+            conditions = emptyList(),
+            volumeProfile = profile,
+            isFallback = true,
         )
     }
 
@@ -174,6 +209,7 @@ class SettingsRepository(private val context: Context) {
     private fun encodeSettings(settings: AppSettings): String {
         return JSONObject().apply {
             put("reapplyMode", settings.reapplyMode.name)
+            put("notifyOnRuleChange", settings.notifyOnRuleChange)
             put(
                 "rules",
                 JSONArray().apply {
@@ -181,15 +217,28 @@ class SettingsRepository(private val context: Context) {
                         put(
                             JSONObject().apply {
                                 put("id", rule.id)
-                                put("conditionType", rule.condition.type.name)
-                                put("conditionValue", rule.condition.value)
-                                put("conditionLabel", rule.condition.label)
+                                put("name", rule.name)
+                                put("isFallback", rule.isFallback)
                                 put("priority", rule.priority)
                                 put("media", rule.volumeProfile.media)
                                 put("ring", rule.volumeProfile.ring)
                                 put("notification", rule.volumeProfile.notification)
                                 put("alarm", rule.volumeProfile.alarm)
                                 put("ringerMode", rule.volumeProfile.ringerMode.name)
+                                put(
+                                    "conditions",
+                                    JSONArray().apply {
+                                        rule.conditions.forEach { condition ->
+                                            put(
+                                                JSONObject().apply {
+                                                    put("conditionType", condition.type.name)
+                                                    put("conditionValue", condition.value)
+                                                    put("conditionLabel", condition.label)
+                                                },
+                                            )
+                                        }
+                                    },
+                                )
                             },
                         )
                     }
@@ -207,8 +256,9 @@ class SettingsRepository(private val context: Context) {
                 add(
                     RuleConfig(
                         id = ruleObject.getString("id"),
-                        condition = decodeCondition(ruleObject),
+                        name = decodeRuleName(ruleObject),
                         priority = ruleObject.getInt("priority"),
+                        conditions = decodeConditions(ruleObject),
                         volumeProfile = VolumeProfile(
                             media = ruleObject.getInt("media"),
                             ring = ruleObject.getInt("ring"),
@@ -216,6 +266,7 @@ class SettingsRepository(private val context: Context) {
                             alarm = ruleObject.getInt("alarm"),
                             ringerMode = decodeRingerMode(ruleObject.getString("ringerMode")),
                         ),
+                        isFallback = decodeIsFallback(ruleObject),
                     ),
                 )
             }
@@ -224,7 +275,39 @@ class SettingsRepository(private val context: Context) {
         return AppSettings(
             rules = rules,
             reapplyMode = decodeReapplyMode(root.optString("reapplyMode")),
+            notifyOnRuleChange = root.optBoolean("notifyOnRuleChange", false),
         )
+    }
+
+    private fun decodeConditions(ruleObject: JSONObject): List<RuleCondition> {
+        if (ruleObject.has("conditions")) {
+            val conditionsArray = ruleObject.getJSONArray("conditions")
+            return buildList {
+                for (index in 0 until conditionsArray.length()) {
+                    add(decodeCondition(conditionsArray.getJSONObject(index)))
+                }
+            }
+        }
+        return decodeLegacyCondition(ruleObject)?.let(::listOf) ?: emptyList()
+    }
+
+    private fun decodeRuleName(ruleObject: JSONObject): String {
+        val savedName = ruleObject.optString("name").takeIf { it.isNotBlank() }
+        if (savedName != null) {
+            return savedName
+        }
+        return if (decodeIsFallback(ruleObject)) {
+            RuleEvaluator.FALLBACK_LABEL
+        } else {
+            decodeConditions(ruleObject).firstOrNull()?.label.orEmpty()
+        }
+    }
+
+    private fun decodeIsFallback(ruleObject: JSONObject): Boolean {
+        if (ruleObject.has("isFallback")) {
+            return ruleObject.optBoolean("isFallback", false)
+        }
+        return ruleObject.optString("conditionType") == LEGACY_FALLBACK_TYPE
     }
 
     private fun decodeCondition(ruleObject: JSONObject): RuleCondition {
@@ -232,19 +315,19 @@ class SettingsRepository(private val context: Context) {
         val value = ruleObject.optString("conditionValue").takeIf { it.isNotBlank() }
         val savedLabel = ruleObject.getString("conditionLabel")
 
-        val normalizedLabel = when (type) {
-            RuleConditionType.MOBILE_DEFAULT -> LABEL_MOBILE_DEFAULT
-            RuleConditionType.WIFI_ANY -> savedLabel
-            RuleConditionType.WIFI_SSID -> savedLabel
-            RuleConditionType.BLUETOOTH_ANY -> savedLabel
-            RuleConditionType.BLUETOOTH_DEVICE -> savedLabel
-        }
-
         return RuleCondition(
             type = type,
             value = value,
-            label = normalizedLabel,
+            label = savedLabel,
         )
+    }
+
+    private fun decodeLegacyCondition(ruleObject: JSONObject): RuleCondition? {
+        return if (ruleObject.optString("conditionType") == LEGACY_FALLBACK_TYPE) {
+            null
+        } else {
+            decodeCondition(ruleObject)
+        }
     }
 
     private fun decodeRingerMode(rawValue: String?): RingerModeOption {
@@ -292,6 +375,6 @@ class SettingsRepository(private val context: Context) {
 
         const val LABEL_BLUETOOTH_ANY = "Bluetooth接続時"
         const val LABEL_WIFI_ANY = "Wi-Fi通信時"
-        const val LABEL_MOBILE_DEFAULT = "その他"
+        const val LEGACY_FALLBACK_TYPE = "MOBILE_DEFAULT"
     }
 }

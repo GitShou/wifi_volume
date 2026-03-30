@@ -35,6 +35,7 @@ import com.example.wifi_volume.model.RuleCondition
 import com.example.wifi_volume.model.RuleConditionType
 import com.example.wifi_volume.model.RuleConfig
 import com.example.wifi_volume.model.RuleEvaluator
+import com.example.wifi_volume.model.RuleEvaluator.ResolvedRule
 import com.example.wifi_volume.model.VolumeLimits
 import com.example.wifi_volume.model.VolumeProfile
 import com.example.wifi_volume.monitor.ConnectionMonitorService
@@ -60,9 +61,11 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var statusText: TextView
     private lateinit var reapplySwitch: MaterialSwitch
+    private lateinit var ruleChangeNotificationSwitch: MaterialSwitch
     private lateinit var rulesContainer: LinearLayout
     private lateinit var volumeSettingsContent: LinearLayout
     private lateinit var globalSettingsContent: LinearLayout
+    private lateinit var deleteSettingButton: MaterialButton
 
     private lateinit var volumeLimits: VolumeLimits
     private lateinit var ringerModeAdapter: ArrayAdapter<CharSequence>
@@ -70,6 +73,7 @@ class MainActivity : AppCompatActivity() {
     private val editableRules = mutableListOf<RuleConfig>()
     private val ruleViews = linkedMapOf<String, RuleCardViews>()
     private var currentActiveRuleId: String? = null
+    private var isDeleteMode = false
 
     private val permissionsLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
@@ -125,9 +129,11 @@ class MainActivity : AppCompatActivity() {
     private fun bindViews() {
         statusText = findViewById(R.id.statusText)
         reapplySwitch = findViewById(R.id.reapplySwitch)
+        ruleChangeNotificationSwitch = findViewById(R.id.ruleChangeNotificationSwitch)
         rulesContainer = findViewById(R.id.rulesContainer)
         volumeSettingsContent = findViewById(R.id.volumeSettingsContent)
         globalSettingsContent = findViewById(R.id.globalSettingsContent)
+        deleteSettingButton = findViewById(R.id.deleteSettingButton)
 
         ringerModeAdapter = ArrayAdapter.createFromResource(
             this,
@@ -139,7 +145,12 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<MaterialButton>(R.id.addConditionButton).setOnClickListener {
             syncEditableRulesFromViews()
-            showAddConditionDialog()
+            setDeleteMode(false)
+            showAddSettingDialog()
+        }
+        deleteSettingButton.setOnClickListener {
+            syncEditableRulesFromViews()
+            setDeleteMode(!isDeleteMode)
         }
         findViewById<MaterialButton>(R.id.permissionsButton).setOnClickListener {
             requestPermissionsIfNeeded(showGrantedMessage = true)
@@ -160,6 +171,7 @@ class MainActivity : AppCompatActivity() {
             getTabAt(TAB_VOLUME_SETTINGS)?.select()
         }
         showTab(TAB_VOLUME_SETTINGS)
+        updateDeleteModeUi()
     }
 
     private fun initializeSettings() {
@@ -170,8 +182,9 @@ class MainActivity : AppCompatActivity() {
             editableRules.clear()
             editableRules.addAll(settings.sortedRules())
             reapplySwitch.isChecked = settings.reapplyMode == ReapplyMode.ALWAYS
+            ruleChangeNotificationSwitch.isChecked = settings.notifyOnRuleChange
             renderRules()
-            applyStatus(resolveActiveRule(settings).condition.label)
+            applyStatus(resolveActiveRule(settings).displayLabel)
         }
     }
 
@@ -182,8 +195,8 @@ class MainActivity : AppCompatActivity() {
                     val settings = settingsRepository.getSettings()
                     currentActiveRuleId = activeRuleState.ruleId
                     val label = activeRuleState.label
-                        ?: settings?.findRule(activeRuleState.ruleId)?.condition?.label
-                        ?: settings?.let { resolveActiveRule(it).condition.label }
+                        ?: settings?.findRule(activeRuleState.ruleId)?.name?.takeIf { it.isNotBlank() }
+                        ?: settings?.let { resolveActiveRule(it).displayLabel }
                         ?: getString(R.string.status_initializing)
                     applyStatus(label)
                     updateRuleHighlights()
@@ -208,12 +221,14 @@ class MainActivity : AppCompatActivity() {
                 descriptionText = cardView.findViewById(R.id.ruleDescriptionText),
                 priorityInputLayout = cardView.findViewById(R.id.priorityInputLayout),
                 priorityEditText = cardView.findViewById(R.id.priorityEditText),
+                conditionsContainer = cardView.findViewById(R.id.conditionsContainer),
+                addConditionButton = cardView.findViewById(R.id.addConditionToRuleButton),
                 mediaSlider = cardView.findViewById(R.id.mediaSlider),
                 ringSlider = cardView.findViewById(R.id.ringSlider),
                 notificationSlider = cardView.findViewById(R.id.notificationSlider),
                 alarmSlider = cardView.findViewById(R.id.alarmSlider),
                 ringerModeSpinner = cardView.findViewById(R.id.ringerModeSpinner),
-                deleteButton = cardView.findViewById(R.id.deleteRuleButton),
+                renameButton = cardView.findViewById(R.id.renameRuleButton),
             )
             bindRuleCard(holder, rule)
             rulesContainer.addView(cardView)
@@ -223,22 +238,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bindRuleCard(holder: RuleCardViews, rule: RuleConfig) {
-        holder.titleText.text = rule.condition.label
-        holder.descriptionText.text = when (rule.condition.type) {
-            RuleConditionType.MOBILE_DEFAULT -> getString(R.string.rule_description_mobile)
-            RuleConditionType.WIFI_ANY -> getString(R.string.rule_description_wifi_any)
-            RuleConditionType.WIFI_SSID -> getString(R.string.rule_description_wifi_ssid)
-            RuleConditionType.BLUETOOTH_ANY -> getString(R.string.rule_description_bluetooth_any)
-            RuleConditionType.BLUETOOTH_DEVICE -> getString(R.string.rule_description_bluetooth_device)
+        holder.titleText.text = rule.name
+        holder.descriptionText.text = if (rule.isFallback) {
+            getString(R.string.rule_description_mobile)
+        } else if (rule.conditions.isEmpty()) {
+            getString(R.string.rule_description_empty_conditions)
+        } else {
+            getString(R.string.rule_description_or)
         }
         holder.ringerModeSpinner.adapter = ringerModeAdapter
 
-        if (rule.condition.type == RuleConditionType.MOBILE_DEFAULT) {
+        if (rule.isFallback) {
             holder.priorityInputLayout.visibility = View.GONE
+            holder.addConditionButton.visibility = View.GONE
         } else {
             holder.priorityInputLayout.visibility = View.VISIBLE
             holder.priorityEditText.setText(rule.priority.toString())
+            holder.addConditionButton.visibility = View.VISIBLE
+            holder.addConditionButton.setOnClickListener {
+                syncEditableRulesFromViews()
+                showAddConditionDialog(rule.id)
+            }
         }
+        renderConditions(holder.conditionsContainer, rule)
 
         configureSlider(holder.mediaSlider, volumeLimits.mediaMax, rule.volumeProfile.media)
         configureSlider(holder.ringSlider, volumeLimits.ringMax, rule.volumeProfile.ring)
@@ -250,14 +272,22 @@ class MainActivity : AppCompatActivity() {
         configureSlider(holder.alarmSlider, volumeLimits.alarmMax, rule.volumeProfile.alarm)
         holder.ringerModeSpinner.setSelection(rule.volumeProfile.ringerMode.ordinal)
 
-        if (rule.condition.canDelete()) {
-            holder.deleteButton.visibility = View.VISIBLE
-            holder.deleteButton.setOnClickListener {
-                syncEditableRulesFromViews()
-                showDeleteRuleDialog(rule.id)
+        holder.renameButton.visibility = if (rule.isFallback) View.GONE else View.VISIBLE
+        holder.renameButton.setOnClickListener {
+            syncEditableRulesFromViews()
+            if (isDeleteMode) {
+                confirmDeleteSetting(rule.id)
+            } else {
+                showRenameSettingDialog(rule.id)
             }
+        }
+        if (isDeleteMode) {
+            holder.renameButton.text = getString(R.string.action_delete)
+            holder.renameButton.backgroundTintList =
+                ContextCompat.getColorStateList(this, R.color.delete_button_red)
+            holder.renameButton.setTextColor(ContextCompat.getColor(this, R.color.white))
         } else {
-            holder.deleteButton.visibility = View.GONE
+            holder.renameButton.text = getString(R.string.action_rename_setting)
         }
     }
 
@@ -277,7 +307,7 @@ class MainActivity : AppCompatActivity() {
 
                 val settings = AppSettings(
                     rules = editableRules.sortedWith(
-                        compareBy<RuleConfig> { it.condition.type == RuleConditionType.MOBILE_DEFAULT }
+                        compareBy<RuleConfig> { it.isFallback }
                             .thenBy { it.priority },
                     ),
                     reapplyMode = if (reapplySwitch.isChecked) {
@@ -285,12 +315,13 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         ReapplyMode.ON_CHANGE_ONLY
                     },
+                    notifyOnRuleChange = ruleChangeNotificationSwitch.isChecked,
                 )
                 settingsRepository.saveSettings(settings)
 
                 val activeRule = resolveActiveRule(settings)
-                volumeController.applyProfile(activeRule.volumeProfile)
-                settingsRepository.setActiveRuleState(activeRule)
+                volumeController.applyProfile(activeRule.rule.volumeProfile)
+                settingsRepository.setActiveRuleState(activeRule.rule.id, activeRule.displayLabel)
 
                 editableRules.clear()
                 editableRules.addAll(settings.sortedRules())
@@ -338,7 +369,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun validateRules(rules: List<RuleConfig>) {
         val priorities = rules
-            .filterNot { it.condition.type == RuleConditionType.MOBILE_DEFAULT }
+            .filterNot { it.isFallback }
             .map { it.priority }
         if (priorities.any { it < 1 }) {
             throw IllegalArgumentException(getString(R.string.toast_priority_invalid))
@@ -346,12 +377,58 @@ class MainActivity : AppCompatActivity() {
         if (priorities.distinct().size != priorities.size) {
             throw IllegalArgumentException(getString(R.string.toast_priority_duplicate))
         }
-        if (rules.count { it.condition.type == RuleConditionType.MOBILE_DEFAULT } != 1) {
+        if (rules.count { it.isFallback } != 1) {
             throw IllegalArgumentException(getString(R.string.toast_error))
         }
     }
 
-    private fun showAddConditionDialog() {
+    private fun showAddSettingDialog() {
+        val inputLayout = TextInputLayout(this).apply {
+            hint = getString(R.string.dialog_add_setting_hint)
+        }
+        val editText = TextInputEditText(inputLayout.context)
+        inputLayout.addView(editText)
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.dialog_add_setting_title)
+            .setView(inputLayout)
+            .setPositiveButton(R.string.dialog_ok) { _, _ ->
+                syncEditableRulesFromViews()
+                addEmptyRule(editText.text?.toString()?.trim().orEmpty())
+            }
+            .setNegativeButton(R.string.dialog_cancel, null)
+            .show()
+    }
+
+    private fun showRenameSettingDialog(ruleId: String) {
+        val rule = editableRules.firstOrNull { it.id == ruleId } ?: return
+        val inputLayout = TextInputLayout(this).apply {
+            hint = getString(R.string.dialog_add_setting_hint)
+        }
+        val editText = TextInputEditText(inputLayout.context).apply {
+            setText(rule.name)
+            setSelection(rule.name.length)
+        }
+        inputLayout.addView(editText)
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.dialog_rename_setting_title)
+            .setView(inputLayout)
+            .setPositiveButton(R.string.dialog_ok) { _, _ ->
+                val index = editableRules.indexOfFirst { it.id == ruleId }
+                if (index != -1) {
+                    editableRules[index] = editableRules[index].copy(
+                        name = editText.text?.toString()?.trim().takeUnless { it.isNullOrBlank() }
+                            ?: editableRules[index].name,
+                    )
+                    renderRules()
+                }
+            }
+            .setNegativeButton(R.string.dialog_cancel, null)
+            .show()
+    }
+
+    private fun showAddConditionDialog(targetRuleId: String) {
         lifecycleScope.launch {
             val deviceState = currentDeviceState()
             val candidates = buildAddableConditions(deviceState)
@@ -367,7 +444,7 @@ class MainActivity : AppCompatActivity() {
             MaterialAlertDialogBuilder(this@MainActivity)
                 .setTitle(R.string.dialog_add_condition_title)
                 .setItems(candidates.map { it.condition.label }.toTypedArray()) { _, which ->
-                    addRule(candidates[which].condition)
+                    addConditionToRule(targetRuleId, candidates[which].condition)
                 }
                 .setNegativeButton(R.string.dialog_cancel, null)
                 .show()
@@ -375,25 +452,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildAddableConditions(deviceState: DeviceState): List<AddConditionCandidate> {
-        val existingRules = editableRules.toList()
+        val existingConditionKeys = editableRules
+            .flatMap { it.conditions }
+            .map(::conditionKey)
+            .toSet()
         val candidates = mutableListOf<AddConditionCandidate>()
-
-        if (deviceState.connectionState == ConnectionState.WIFI &&
-            existingRules.none { it.condition.type == RuleConditionType.WIFI_ANY }
-        ) {
-            candidates += AddConditionCandidate(
-                condition = RuleCondition(
-                    type = RuleConditionType.WIFI_ANY,
-                    label = getString(R.string.rule_label_wifi_any),
-                ),
-            )
-        }
 
         deviceState.currentWifiSsid
             ?.takeIf { ssid ->
-                existingRules.none {
-                    it.condition.type == RuleConditionType.WIFI_SSID && it.condition.value == ssid
-                }
+                conditionKey(RuleCondition(type = RuleConditionType.WIFI_SSID, value = ssid, label = "")) !in existingConditionKeys
             }
             ?.let { ssid ->
                 candidates += AddConditionCandidate(
@@ -405,22 +472,14 @@ class MainActivity : AppCompatActivity() {
                 )
             }
 
-        if (deviceState.connectedBluetoothDevices.isNotEmpty() &&
-            existingRules.none { it.condition.type == RuleConditionType.BLUETOOTH_ANY }
-        ) {
-            candidates += AddConditionCandidate(
-                condition = RuleCondition(
-                    type = RuleConditionType.BLUETOOTH_ANY,
-                    label = getString(R.string.rule_label_bluetooth_any),
-                ),
-            )
-        }
-
         deviceState.connectedBluetoothDevices.forEach { device ->
-            if (existingRules.none {
-                    it.condition.type == RuleConditionType.BLUETOOTH_DEVICE &&
-                        it.condition.value == device.address
-                }
+            if (conditionKey(
+                    RuleCondition(
+                        type = RuleConditionType.BLUETOOTH_DEVICE,
+                        value = device.address,
+                        label = "",
+                    ),
+                ) !in existingConditionKeys
             ) {
                 candidates += AddConditionCandidate(
                     condition = RuleCondition(
@@ -435,48 +494,132 @@ class MainActivity : AppCompatActivity() {
         return candidates
     }
 
-    private fun addRule(condition: RuleCondition) {
-        val nextPriority = (
-            editableRules
-                .filterNot { it.condition.type == RuleConditionType.MOBILE_DEFAULT }
-                .maxOfOrNull { it.priority } ?: 0
-            ) + 1
+    private fun addEmptyRule(inputName: String) {
+        val shiftedRules = editableRules.map { rule ->
+            if (rule.isFallback) {
+                rule
+            } else {
+                rule.copy(priority = rule.priority + 1)
+            }
+        }
+        editableRules.clear()
+        editableRules.addAll(shiftedRules)
         editableRules += RuleConfig(
             id = UUID.randomUUID().toString(),
-            condition = condition,
-            priority = nextPriority,
+            name = inputName.ifBlank { nextDefaultRuleName() },
+            priority = 1,
+            conditions = emptyList(),
             volumeProfile = volumeController.readCurrentProfile(),
         )
         renderRules()
     }
 
-    private fun showDeleteRuleDialog(ruleId: String) {
+    private fun addConditionToRule(ruleId: String, condition: RuleCondition) {
+        val index = editableRules.indexOfFirst { it.id == ruleId }
+        if (index == -1) {
+            return
+        }
+        val rule = editableRules[index]
+        editableRules[index] = rule.copy(conditions = rule.conditions + condition)
+        renderRules()
+    }
+
+    private fun confirmDeleteSetting(ruleId: String) {
         val rule = editableRules.firstOrNull { it.id == ruleId } ?: return
         MaterialAlertDialogBuilder(this)
-            .setTitle(R.string.dialog_delete_rule_title)
-            .setMessage(getString(R.string.dialog_delete_rule_message, rule.condition.label))
+            .setTitle(R.string.dialog_delete_setting_title)
+            .setMessage(getString(R.string.dialog_delete_setting_message, rule.name))
             .setPositiveButton(R.string.dialog_ok) { _, _ ->
                 editableRules.removeAll { it.id == ruleId }
+                if (editableRules.none { !it.isFallback }) {
+                    setDeleteMode(false)
+                }
                 renderRules()
             }
             .setNegativeButton(R.string.dialog_cancel, null)
             .show()
     }
 
-    private suspend fun resolveActiveRule(settings: AppSettings): RuleConfig {
+    private fun setDeleteMode(enabled: Boolean) {
+        if (isDeleteMode == enabled) {
+            return
+        }
+        isDeleteMode = enabled
+        updateDeleteModeUi()
+        renderRules()
+    }
+
+    private fun updateDeleteModeUi() {
+        deleteSettingButton.text = if (isDeleteMode) {
+            getString(R.string.action_finish_delete_mode)
+        } else {
+            getString(R.string.action_delete_setting)
+        }
+    }
+
+    private fun renderConditions(container: LinearLayout, rule: RuleConfig) {
+        container.removeAllViews()
+        if (rule.isFallback) {
+            return
+        }
+        rule.conditions.forEach { condition ->
+            val row = LayoutInflater.from(this).inflate(
+                R.layout.item_condition_row,
+                container,
+                false,
+            )
+            row.findViewById<TextView>(R.id.conditionText).text = condition.label
+            row.findViewById<MaterialButton>(R.id.deleteConditionButton).setOnClickListener {
+                syncEditableRulesFromViews()
+                showDeleteConditionDialog(rule.id, condition)
+            }
+            container.addView(row)
+        }
+    }
+
+    private fun showDeleteConditionDialog(ruleId: String, condition: RuleCondition) {
+        val rule = editableRules.firstOrNull { it.id == ruleId } ?: return
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.dialog_delete_rule_title)
+            .setMessage(getString(R.string.dialog_delete_rule_message, condition.label))
+            .setPositiveButton(R.string.dialog_ok) { _, _ ->
+                val index = editableRules.indexOfFirst { it.id == ruleId }
+                if (index != -1) {
+                    editableRules[index] = rule.copy(
+                        conditions = rule.conditions.filterNot { conditionKey(it) == conditionKey(condition) },
+                    )
+                }
+                renderRules()
+            }
+            .setNegativeButton(R.string.dialog_cancel, null)
+            .show()
+    }
+
+    private suspend fun resolveActiveRule(settings: AppSettings): ResolvedRule {
         return ruleEvaluator.resolveActiveRule(settings, currentDeviceState())
     }
 
     private fun normalizeMobileRulePriority(rules: MutableList<RuleConfig>) {
-        val mobileRuleIndex = rules.indexOfFirst { it.condition.type == RuleConditionType.MOBILE_DEFAULT }
+        val mobileRuleIndex = rules.indexOfFirst { it.isFallback }
         if (mobileRuleIndex == -1) {
             return
         }
         val fallbackPriority = (
-            rules.filterNot { it.condition.type == RuleConditionType.MOBILE_DEFAULT }
+            rules.filterNot { it.isFallback }
                 .maxOfOrNull { it.priority } ?: 0
             ) + 1
         rules[mobileRuleIndex] = rules[mobileRuleIndex].copy(priority = fallbackPriority)
+    }
+
+    private fun conditionKey(condition: RuleCondition): String {
+        return "${condition.type.name}:${condition.value.orEmpty()}"
+    }
+
+    private fun nextDefaultRuleName(): String {
+        val maxIndex = editableRules.mapNotNull { rule ->
+            DEFAULT_RULE_NAME_REGEX.matchEntire(rule.name)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        }.maxOrNull() ?: 0
+        return "設定${maxIndex + 1}"
     }
 
     private suspend fun currentDeviceState(): DeviceState {
@@ -597,12 +740,14 @@ class MainActivity : AppCompatActivity() {
         val descriptionText: TextView,
         val priorityInputLayout: TextInputLayout,
         val priorityEditText: TextInputEditText,
+        val conditionsContainer: LinearLayout,
+        val addConditionButton: MaterialButton,
         val mediaSlider: Slider,
         val ringSlider: Slider,
         val notificationSlider: Slider,
         val alarmSlider: Slider,
         val ringerModeSpinner: Spinner,
-        val deleteButton: MaterialButton,
+        val renameButton: MaterialButton,
     )
 
     private data class AddConditionCandidate(
@@ -612,5 +757,6 @@ class MainActivity : AppCompatActivity() {
     private companion object {
         const val TAB_VOLUME_SETTINGS = 0
         const val TAB_GLOBAL_SETTINGS = 1
+        val DEFAULT_RULE_NAME_REGEX = Regex("^設定(\\d+)$")
     }
 }

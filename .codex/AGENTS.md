@@ -11,6 +11,9 @@
 - The shared Android SDK for this project is located at `/mnt/d/project/DevelopmentKit/AndroidStudioCLforLinux`.
 - Do not rely on `local.properties` for the SDK path.
 - Use `ANDROID_HOME=/mnt/d/project/DevelopmentKit/AndroidStudioCLforLinux` from the WSL environment.
+- Android Studio on Windows may recreate `local.properties` with a Windows-only `sdk.dir`.
+- When building from WSL, ignore `sdk.dir` warnings from `local.properties` as long as the build succeeds with `ANDROID_HOME`.
+- Do not edit or delete `local.properties` just to suppress this warning.
 
 ## WSL Build Rule
 

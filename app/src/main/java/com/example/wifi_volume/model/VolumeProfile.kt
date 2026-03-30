@@ -31,7 +31,6 @@ enum class ReapplyMode {
 }
 
 enum class RuleConditionType {
-    MOBILE_DEFAULT,
     WIFI_ANY,
     WIFI_SSID,
     BLUETOOTH_ANY,
@@ -43,13 +42,8 @@ data class RuleCondition(
     val value: String? = null,
     val label: String,
 ) {
-    fun canDelete(): Boolean {
-        return type != RuleConditionType.MOBILE_DEFAULT
-    }
-
     fun description(): String {
         return when (type) {
-            RuleConditionType.MOBILE_DEFAULT -> "その他"
             RuleConditionType.WIFI_ANY -> "任意の Wi-Fi 接続"
             RuleConditionType.WIFI_SSID -> "特定の Wi-Fi"
             RuleConditionType.BLUETOOTH_ANY -> "任意の Bluetooth 接続"
@@ -60,18 +54,21 @@ data class RuleCondition(
 
 data class RuleConfig(
     val id: String,
-    val condition: RuleCondition,
+    val name: String,
     val priority: Int,
+    val conditions: List<RuleCondition>,
     val volumeProfile: VolumeProfile,
+    val isFallback: Boolean = false,
 )
 
 data class AppSettings(
     val rules: List<RuleConfig>,
     val reapplyMode: ReapplyMode,
+    val notifyOnRuleChange: Boolean,
 ) {
     fun sortedRules(): List<RuleConfig> {
         return rules.sortedWith(
-            compareBy<RuleConfig> { it.condition.type == RuleConditionType.MOBILE_DEFAULT }
+            compareBy<RuleConfig> { it.isFallback }
                 .thenBy { it.priority },
         )
     }
@@ -80,8 +77,8 @@ data class AppSettings(
         return rules.firstOrNull { it.id == ruleId }
     }
 
-    fun mobileRule(): RuleConfig {
-        return rules.first { it.condition.type == RuleConditionType.MOBILE_DEFAULT }
+    fun fallbackRule(): RuleConfig {
+        return rules.first { it.isFallback }
     }
 }
 
@@ -104,22 +101,48 @@ data class DeviceState(
 )
 
 class RuleEvaluator {
-    fun resolveActiveRule(settings: AppSettings, deviceState: DeviceState): RuleConfig {
-        return settings.sortedRules().firstOrNull { matches(it, deviceState) } ?: settings.mobileRule()
+    fun resolveActiveRule(settings: AppSettings, deviceState: DeviceState): ResolvedRule {
+        settings.sortedRules().forEach { rule ->
+            if (rule.isFallback) {
+                return@forEach
+            }
+            val matchedCondition = rule.conditions.firstOrNull { matches(it, deviceState) }
+            if (matchedCondition != null) {
+                return ResolvedRule(
+                    rule = rule,
+                    matchedLabel = matchedCondition.label,
+                    displayLabel = rule.name.ifBlank { matchedCondition.label },
+                )
+            }
+        }
+        return ResolvedRule(
+            rule = settings.fallbackRule(),
+            matchedLabel = FALLBACK_LABEL,
+            displayLabel = settings.fallbackRule().name.ifBlank { FALLBACK_LABEL },
+        )
     }
 
-    private fun matches(rule: RuleConfig, deviceState: DeviceState): Boolean {
-        return when (rule.condition.type) {
-            RuleConditionType.MOBILE_DEFAULT -> true
+    private fun matches(condition: RuleCondition, deviceState: DeviceState): Boolean {
+        return when (condition.type) {
             RuleConditionType.WIFI_ANY -> deviceState.connectionState == ConnectionState.WIFI
             RuleConditionType.WIFI_SSID ->
                 deviceState.connectionState == ConnectionState.WIFI &&
-                    rule.condition.value != null &&
-                    rule.condition.value == deviceState.currentWifiSsid
+                    condition.value != null &&
+                    condition.value == deviceState.currentWifiSsid
             RuleConditionType.BLUETOOTH_ANY -> deviceState.connectedBluetoothDevices.isNotEmpty()
             RuleConditionType.BLUETOOTH_DEVICE ->
-                rule.condition.value != null &&
-                    deviceState.connectedBluetoothDevices.any { it.address == rule.condition.value }
+                condition.value != null &&
+                    deviceState.connectedBluetoothDevices.any { it.address == condition.value }
         }
+    }
+
+    data class ResolvedRule(
+        val rule: RuleConfig,
+        val matchedLabel: String,
+        val displayLabel: String,
+    )
+
+    companion object {
+        const val FALLBACK_LABEL = "その他"
     }
 }
