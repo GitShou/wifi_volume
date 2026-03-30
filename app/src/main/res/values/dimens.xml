@@ -1,0 +1,3 @@
+<resources>
+    <dimen name="active_rule_stroke_width">3dp</dimen>
+</resources>

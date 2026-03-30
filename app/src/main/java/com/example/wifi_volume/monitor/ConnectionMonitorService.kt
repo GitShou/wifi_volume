@@ -1,0 +1,200 @@
+package com.example.wifi_volume.monitor
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.os.IBinder
+import androidx.core.app.NotificationCompat
+import com.example.wifi_volume.MainActivity
+import com.example.wifi_volume.R
+import com.example.wifi_volume.audio.VolumeController
+import com.example.wifi_volume.bluetooth.BluetoothStateResolver
+import com.example.wifi_volume.data.SettingsRepository
+import com.example.wifi_volume.model.DeviceState
+import com.example.wifi_volume.model.ReapplyMode
+import com.example.wifi_volume.model.RuleEvaluator
+import com.example.wifi_volume.network.ConnectionStateResolver
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+
+class ConnectionMonitorService : Service() {
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private lateinit var settingsRepository: SettingsRepository
+    private lateinit var volumeController: VolumeController
+    private lateinit var connectionStateResolver: ConnectionStateResolver
+    private lateinit var bluetoothStateResolver: BluetoothStateResolver
+    private val ruleEvaluator = RuleEvaluator()
+    private var pendingEvaluationJob: Job? = null
+
+    private var isNetworkCallbackRegistered = false
+    private var isBluetoothReceiverRegistered = false
+
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            requestRuleEvaluation()
+        }
+
+        override fun onCapabilitiesChanged(
+            network: Network,
+            networkCapabilities: NetworkCapabilities,
+        ) {
+            requestRuleEvaluation()
+        }
+
+        override fun onLost(network: Network) {
+            requestRuleEvaluation()
+        }
+    }
+
+    private val bluetoothReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED,
+                BluetoothAdapter.ACTION_STATE_CHANGED,
+                BluetoothDevice.ACTION_ACL_CONNECTED,
+                BluetoothDevice.ACTION_ACL_DISCONNECTED,
+                -> requestRuleEvaluation()
+            }
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        settingsRepository = SettingsRepository(applicationContext)
+        volumeController = VolumeController(applicationContext)
+        connectionStateResolver = ConnectionStateResolver(applicationContext)
+        bluetoothStateResolver = BluetoothStateResolver(applicationContext)
+
+        createNotificationChannel()
+        startForeground(
+            NOTIFICATION_ID,
+            buildNotification(getString(R.string.notification_initializing)),
+        )
+        serviceScope.launch {
+            settingsRepository.activeRuleStateFlow.collectLatest { activeRuleState ->
+                val message = activeRuleState.label?.let {
+                    getString(R.string.notification_active_rule, it)
+                } ?: getString(R.string.notification_initializing)
+                getSystemService(NotificationManager::class.java)
+                    .notify(NOTIFICATION_ID, buildNotification(message))
+            }
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!isNetworkCallbackRegistered) {
+            connectionStateResolver.connectivityManager.registerDefaultNetworkCallback(networkCallback)
+            isNetworkCallbackRegistered = true
+        }
+        if (!isBluetoothReceiverRegistered) {
+            registerReceiver(
+                bluetoothReceiver,
+                IntentFilter().apply {
+                    addAction(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED)
+                    addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+                    addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+                    addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+                },
+                RECEIVER_NOT_EXPORTED,
+            )
+            isBluetoothReceiverRegistered = true
+        }
+
+        requestRuleEvaluation(immediate = true)
+        return START_STICKY
+    }
+
+    override fun onDestroy() {
+        if (isNetworkCallbackRegistered) {
+            connectionStateResolver.connectivityManager.unregisterNetworkCallback(networkCallback)
+        }
+        if (isBluetoothReceiverRegistered) {
+            unregisterReceiver(bluetoothReceiver)
+        }
+        pendingEvaluationJob?.cancel()
+        serviceScope.cancel()
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun requestRuleEvaluation(immediate: Boolean = false) {
+        pendingEvaluationJob?.cancel()
+        pendingEvaluationJob = serviceScope.launch {
+            if (!immediate) {
+                delay(EVENT_STABILIZE_DELAY_MS)
+            }
+            val settings = settingsRepository.getSettings() ?: return@launch
+            val connectionSnapshot = connectionStateResolver.resolveSnapshot()
+            val activeRule = ruleEvaluator.resolveActiveRule(
+                settings = settings,
+                deviceState = DeviceState(
+                    connectionState = connectionSnapshot.connectionState,
+                    currentWifiSsid = connectionSnapshot.currentWifiSsid,
+                    connectedBluetoothDevices = bluetoothStateResolver.getConnectedDevices(),
+                ),
+            )
+            val shouldApply = when (settings.reapplyMode) {
+                ReapplyMode.ALWAYS -> true
+                ReapplyMode.ON_CHANGE_ONLY -> settingsRepository.getActiveRuleId() != activeRule.id
+            }
+
+            if (shouldApply) {
+                volumeController.applyProfile(activeRule.volumeProfile)
+            }
+            settingsRepository.setActiveRuleState(activeRule)
+        }
+    }
+
+    private fun buildNotification(message: String): Notification {
+        val launchIntent = Intent(this, MainActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            launchIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+
+        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setContentTitle(getString(R.string.notification_title))
+            .setContentText(message)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .build()
+    }
+
+    private fun createNotificationChannel() {
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        val channel = NotificationChannel(
+            NOTIFICATION_CHANNEL_ID,
+            getString(R.string.notification_channel_name),
+            NotificationManager.IMPORTANCE_LOW,
+        )
+        notificationManager.createNotificationChannel(channel)
+    }
+
+    private companion object {
+        const val NOTIFICATION_CHANNEL_ID = "connection_monitor"
+        const val NOTIFICATION_ID = 1001
+        const val EVENT_STABILIZE_DELAY_MS = 1200L
+    }
+}
