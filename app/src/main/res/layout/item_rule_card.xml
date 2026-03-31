@@ -1,4 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  設定カード1件ぶんのレイアウトです。
+
+  役割:
+  - 設定名、優先度、条件一覧、音量スライダー、着信モードをまとめて表示する
+  - MainActivity.kt がこのレイアウトを複製して、設定件数ぶんカードを並べる
+
+  関係する主なファイル:
+  - MainActivity.kt: 各部品へ値を入れたり、ボタン押下時の処理を設定する
+  - item_condition_row.xml: 条件一覧の中の1行として使う
+  - strings.xml: カード内ラベルの文言定義
+
+  Android に不慣れな人向けの見方:
+  - 「設定1件ぶんの見た目」を部品化したファイル
+  - 実際のデータは持たず、表示の枠だけを定義している
+-->
 <com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"

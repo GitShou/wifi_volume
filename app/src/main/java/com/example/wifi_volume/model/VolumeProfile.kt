@@ -1,3 +1,20 @@
+/**
+ * アプリ全体で使う「設定データの型」と「判定ルール」をまとめたファイルです。
+ *
+ * 役割:
+ * - 音量設定そのものを表す [VolumeProfile] を定義する
+ * - 1つの設定カードを表す [RuleConfig] を定義する
+ * - Wi-Fi / Bluetooth 条件をどう判定するかを [RuleEvaluator] にまとめる
+ *
+ * 関係する主なファイル:
+ * - [MainActivity]: ここで定義した型を画面編集用のデータとして使う
+ * - [SettingsRepository]: ここで定義した型を JSON として保存・復元する
+ * - [ConnectionMonitorService]: [RuleEvaluator] を使って「今どの設定を適用すべきか」を決める
+ *
+ * Android に不慣れな人向けの見方:
+ * - このファイルは「画面」ではなく「アプリが扱うデータの設計図」
+ * - 挙動がおかしい時に、どの条件でどの設定が選ばれるかを確認したいならここを見る
+ */
 package com.example.wifi_volume.model
 
 import android.media.AudioManager

@@ -1,3 +1,12 @@
 <resources>
+    <!--
+      画面の寸法値をまとめたファイルです。
+
+      役割:
+      - コードやレイアウトで共通利用したい寸法を名前付きで定義する
+
+      関係する主なファイル:
+      - MainActivity.kt: 現在適用中の設定カードを強調表示する枠線の太さで使用する
+    -->
     <dimen name="active_rule_stroke_width">3dp</dimen>
 </resources>

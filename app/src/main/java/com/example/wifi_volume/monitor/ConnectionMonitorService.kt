@@ -1,3 +1,21 @@
+/**
+ * 画面を閉じた後も動き続ける常駐監視サービスです。
+ *
+ * 役割:
+ * - Wi-Fi / Bluetooth の接続変化を受け取る
+ * - 保存済みルールと現在の接続状況を照合する
+ * - 必要なら [VolumeController] で音量を変更し、通知表示も更新する
+ *
+ * 関係する主なファイル:
+ * - [MainActivity]: アプリ起動時にこのサービスを開始する
+ * - [SettingsRepository]: 保存済み設定の読み出しと、適用中設定の共有に使う
+ * - [ConnectionStateResolver], [BluetoothStateResolver]: 現在の接続状況を取得する
+ * - [VolumeProfile.kt]: [RuleEvaluator] を使って適用対象を決める
+ *
+ * Android に不慣れな人向けの見方:
+ * - 「自動切替が実際に動く場所」はこのファイル
+ * - 画面の設定を保存しただけでは自動では動かず、このサービスが監視して初めて切替が起きる
+ */
 package com.example.wifi_volume.monitor
 
 import android.app.Notification
@@ -23,7 +41,10 @@ import com.example.wifi_volume.bluetooth.BluetoothStateResolver
 import com.example.wifi_volume.data.SettingsRepository
 import com.example.wifi_volume.model.DeviceState
 import com.example.wifi_volume.model.ReapplyMode
+import com.example.wifi_volume.model.RuleConditionType
+import com.example.wifi_volume.model.RuleConfig
 import com.example.wifi_volume.model.RuleEvaluator
+import com.example.wifi_volume.model.RuleEvaluator.ResolvedRule
 import com.example.wifi_volume.network.ConnectionStateResolver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -156,30 +177,72 @@ class ConnectionMonitorService : Service() {
             val settings = settingsRepository.getSettings() ?: return@launch
             val previousActiveRuleId = settingsRepository.getActiveRuleId()
             val connectionSnapshot = connectionStateResolver.resolveSnapshot()
+            val deviceState = DeviceState(
+                connectionState = connectionSnapshot.connectionState,
+                currentWifiSsid = connectionSnapshot.currentWifiSsid,
+                connectedBluetoothDevices = bluetoothStateResolver.getConnectedDevices(),
+            )
             val activeRule = ruleEvaluator.resolveActiveRule(
                 settings = settings,
-                deviceState = DeviceState(
-                    connectionState = connectionSnapshot.connectionState,
-                    currentWifiSsid = connectionSnapshot.currentWifiSsid,
-                    connectedBluetoothDevices = bluetoothStateResolver.getConnectedDevices(),
-                ),
+                deviceState = deviceState,
+            )
+            val resolvedRule = retainPreviousWifiRuleIfNeeded(
+                activeRule = activeRule,
+                previousActiveRuleId = previousActiveRuleId,
+                settings = settings,
+                deviceState = deviceState,
             )
             val shouldApply = when (settings.reapplyMode) {
                 ReapplyMode.ALWAYS -> true
-                ReapplyMode.ON_CHANGE_ONLY -> settingsRepository.getActiveRuleId() != activeRule.rule.id
+                ReapplyMode.ON_CHANGE_ONLY -> settingsRepository.getActiveRuleId() != resolvedRule.rule.id
             }
 
             if (shouldApply) {
-                volumeController.applyProfile(activeRule.rule.volumeProfile)
+                volumeController.applyProfile(resolvedRule.rule.volumeProfile)
             }
-            settingsRepository.setActiveRuleState(activeRule.rule.id, activeRule.displayLabel)
+            settingsRepository.setActiveRuleState(resolvedRule.rule.id, resolvedRule.displayLabel)
             if (settings.notifyOnRuleChange &&
                 previousActiveRuleId != null &&
-                previousActiveRuleId != activeRule.rule.id
+                previousActiveRuleId != resolvedRule.rule.id
             ) {
-                showRuleChangeNotification(activeRule.displayLabel)
+                showRuleChangeNotification(resolvedRule.displayLabel)
             }
         }
+    }
+
+    private fun retainPreviousWifiRuleIfNeeded(
+        activeRule: ResolvedRule,
+        previousActiveRuleId: String?,
+        settings: com.example.wifi_volume.model.AppSettings,
+        deviceState: DeviceState,
+    ): ResolvedRule {
+        if (!activeRule.rule.isFallback) {
+            return activeRule
+        }
+        if (deviceState.connectionState != com.example.wifi_volume.network.ConnectionState.WIFI) {
+            return activeRule
+        }
+        if (deviceState.currentWifiSsid != null) {
+            return activeRule
+        }
+
+        val previousRule = settings.findRule(previousActiveRuleId)
+            ?.takeIf(::hasWifiSpecificCondition)
+            ?: return activeRule
+
+        val fallbackLabel = previousRule.name.ifBlank {
+            previousRule.conditions.firstOrNull { it.type == RuleConditionType.WIFI_SSID }?.label
+                ?: activeRule.displayLabel
+        }
+        return ResolvedRule(
+            rule = previousRule,
+            matchedLabel = fallbackLabel,
+            displayLabel = fallbackLabel,
+        )
+    }
+
+    private fun hasWifiSpecificCondition(rule: RuleConfig): Boolean {
+        return !rule.isFallback && rule.conditions.any { it.type == RuleConditionType.WIFI_SSID }
     }
 
     private fun buildNotification(message: String): Notification {

@@ -1,3 +1,21 @@
+/**
+ * 設定の保存と読み出しを担当するファイルです。
+ *
+ * 役割:
+ * - ユーザーが保存した設定を DataStore に書き込む
+ * - アプリ起動時や監視サービス開始時に保存済み設定を読み出す
+ * - いま適用中の設定名 / 設定 ID を保持し、画面と通知の両方に渡す
+ *
+ * 関係する主なファイル:
+ * - [MainActivity]: 画面で編集した内容を保存するときに使う
+ * - [ConnectionMonitorService]: 自動切替のたびに設定を読み出し、適用中状態も更新する
+ * - [VolumeProfile.kt]: ここで扱う [AppSettings] や [RuleConfig] の型定義元
+ *
+ * Android に不慣れな人向けの見方:
+ * - 「保存先の窓口」はこのファイル
+ * - 画面やサービスから直接 DataStore を触らず、必ずここを経由している
+ * - そのため、保存まわりの不具合はまずこのファイルを確認すると追いやすい
+ */
 package com.example.wifi_volume.data
 
 import android.content.Context

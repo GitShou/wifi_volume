@@ -1,3 +1,22 @@
+/**
+ * このアプリのメイン画面です。
+ *
+ * 役割:
+ * - 画面に設定カードや全体設定タブを表示する
+ * - ユーザーが編集した内容を [SettingsRepository] に保存する
+ * - 保存後に現在の接続状況を見て、すぐに [VolumeController] で音量を反映する
+ *
+ * 関係する主なファイル:
+ * - [SettingsRepository]: 設定の保存先。画面の入力値は最終的にここへ保存される
+ * - [ConnectionMonitorService]: 画面を閉じた後も接続状況を監視して自動切替する
+ * - [ConnectionStateResolver], [BluetoothStateResolver]: いま何に接続しているかを取得する
+ * - [activity_main.xml], [item_rule_card.xml], [item_condition_row.xml]: この画面の見た目を定義する
+ *
+ * Android に不慣れな人向けの見方:
+ * - 「画面の入口」はまずこのファイル
+ * - 「保存や監視の実処理」は別ファイルに分けている
+ * - そのため、UI の動きで迷ったらこのファイルから追うのが一番分かりやすい
+ */
 package com.example.wifi_volume
 
 import android.Manifest
@@ -686,6 +705,9 @@ class MainActivity : AppCompatActivity() {
             ) {
                 add(Manifest.permission.BLUETOOTH_CONNECT)
             }
+            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                add(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                 checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) != PackageManager.PERMISSION_GRANTED
             ) {
@@ -702,6 +724,7 @@ class MainActivity : AppCompatActivity() {
     private fun shouldHandleInApp(permission: String): Boolean {
         return when (permission) {
             Manifest.permission.BLUETOOTH_CONNECT -> Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+            Manifest.permission.ACCESS_FINE_LOCATION -> true
             Manifest.permission.NEARBY_WIFI_DEVICES,
             Manifest.permission.POST_NOTIFICATIONS,
             -> Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU

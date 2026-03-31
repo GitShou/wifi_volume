@@ -1,4 +1,15 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
+    <!--
+      アプリ全体のテーマ設定です。
+
+      役割:
+      - 画面全体の見た目の基本ルールを決める
+      - Material3 テーマを土台として、このアプリのテーマ名を定義する
+
+      関係する主なファイル:
+      - AndroidManifest.xml: アプリ全体で使うテーマとしてこのファイルの style を参照する
+      - 各レイアウト XML: textAppearance などの見た目はここで選んだテーマの影響を受ける
+    -->
     <!-- Base application theme. -->
     <style name="Base.Theme.Wifi_volume" parent="Theme.Material3.DayNight.NoActionBar">
         <!-- Customize your light theme here. -->

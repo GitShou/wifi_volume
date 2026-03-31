@@ -1,5 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!--
+      アプリで使う色をまとめたファイルです。
+
+      役割:
+      - ボタン色や基本色を名前付きで定義する
+      - レイアウトやコードから色コードを直接書かずに再利用できるようにする
+
+      関係する主なファイル:
+      - activity_main.xml: 追加 / 削除ボタンの色で使用する
+      - MainActivity.kt: 削除モード時のボタン色変更で使用する
+    -->
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
     <color name="add_button_green">#2E7D32</color>

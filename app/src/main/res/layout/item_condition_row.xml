@@ -1,4 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  条件一覧の1行を表す小さなレイアウトです。
+
+  役割:
+  - 条件名を表示する
+  - その条件だけを削除するボタンを置く
+
+  関係する主なファイル:
+  - item_rule_card.xml: 条件一覧コンテナの中でこの行を使う
+  - MainActivity.kt: 条件文言を入れ、削除ボタンの処理を結びつける
+
+  Android に不慣れな人向けの見方:
+  - 画面全体ではなく「条件1行ぶんだけ」の部品
+-->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"

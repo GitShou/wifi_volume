@@ -1,4 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  このアプリのメイン画面レイアウトです。
+
+  役割:
+  - 音量設定タブと全体設定タブの土台を作る
+  - 上部の状態表示、設定カード一覧、保存ボタンを配置する
+
+  関係する主なファイル:
+  - MainActivity.kt: このレイアウトを読み込み、各 View に処理を結びつける
+  - item_rule_card.xml: 設定カード1件ぶんを rulesContainer に追加するときに使う
+  - strings.xml / colors.xml / dimens.xml: 文言・色・寸法の定義元
+
+  Android に不慣れな人向けの見方:
+  - 「画面の骨組み」だけを書いたファイル
+  - ボタンを押した時の動きはここではなく MainActivity.kt 側にある
+-->
 <androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/main"

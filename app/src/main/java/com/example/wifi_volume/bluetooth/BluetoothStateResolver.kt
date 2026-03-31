@@ -1,3 +1,20 @@
+/**
+ * 現在接続中の Bluetooth 端末一覧を取得するファイルです。
+ *
+ * 役割:
+ * - Bluetooth の接続権限があるかを確認する
+ * - ヘッドホンなど、現在つながっている端末一覧を取得する
+ * - 条件追加や自動判定で使いやすい形に整える
+ *
+ * 関係する主なファイル:
+ * - [MainActivity]: 条件追加ダイアログで接続中端末を候補として表示する
+ * - [ConnectionMonitorService]: 自動切替時に Bluetooth 条件へ一致するか判定する
+ * - [ConnectedBluetoothDevice]: 取得した端末情報を UI / 判定で扱いやすくする型
+ *
+ * Android に不慣れな人向けの見方:
+ * - 「Bluetooth 接続中の端末を知りたい」ときの入口
+ * - Android の Bluetooth API は profile ごとに取得方法が違うため、その面倒さをここに閉じ込めている
+ */
 package com.example.wifi_volume.bluetooth
 
 import android.Manifest

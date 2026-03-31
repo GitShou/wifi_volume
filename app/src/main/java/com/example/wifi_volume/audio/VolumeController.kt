@@ -1,3 +1,20 @@
+/**
+ * 実際の音量読み取りと音量変更を担当するファイルです。
+ *
+ * 役割:
+ * - 端末の現在音量を読み取って [VolumeProfile] に変換する
+ * - 各ストリームの最大値を取得して UI のスライダー範囲に渡す
+ * - 保存済み [VolumeProfile] を端末へ適用する
+ *
+ * 関係する主なファイル:
+ * - [MainActivity]: 初期値表示、保存直後の即時適用、スライダー上限取得で使う
+ * - [ConnectionMonitorService]: 自動切替で選ばれた設定を反映する
+ * - [VolumeProfile.kt]: 入出力に使う音量データ型の定義元
+ *
+ * Android に不慣れな人向けの見方:
+ * - 「音量そのものを触る場所」はこのファイルだけ
+ * - UI や監視処理から AudioManager を直接触らせないように分離している
+ */
 package com.example.wifi_volume.audio
 
 import android.content.Context

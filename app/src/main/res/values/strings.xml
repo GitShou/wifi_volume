@@ -1,4 +1,18 @@
 <resources>
+    <!--
+      アプリで使う文言をまとめたファイルです。
+
+      役割:
+      - 画面ラベル、ボタン文言、通知文言、トースト文言を一元管理する
+      - レイアウト XML や Kotlin コードから同じ文字列を再利用できるようにする
+
+      関係する主なファイル:
+      - activity_main.xml / item_rule_card.xml / item_condition_row.xml: 画面表示の文言参照先
+      - MainActivity.kt / ConnectionMonitorService.kt: トーストや通知で表示する文言参照先
+
+      Android に不慣れな人向けの見方:
+      - 画面に見える日本語を直接コードへ埋め込まず、ここに集めるのが Android の基本
+    -->
     <string name="app_name">wifi_volume</string>
     <string name="screen_title">通信別ボリューム設定</string>
     <string name="screen_description">アプリ起動中は Wi-Fi / Bluetooth 条件を監視し、優先度 1 から順に一致した設定を自動適用します。一致しない場合はその他を適用します。</string>
