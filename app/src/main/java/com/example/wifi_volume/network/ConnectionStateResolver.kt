@@ -19,13 +19,14 @@ package com.example.wifi_volume.network
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
-import android.location.LocationManager
 import androidx.core.content.ContextCompat
+import com.example.wifi_volume.log.AppLog
 
 enum class ConnectionState {
     WIFI,
@@ -53,11 +54,15 @@ class ConnectionStateResolver(context: Context) {
 
     fun resolveSnapshot(): ConnectionSnapshot {
         val activeNetwork = connectivityManager.activeNetwork
-            ?: return ConnectionSnapshot(ConnectionState.NON_WIFI, null)
+            ?: return ConnectionSnapshot(ConnectionState.NON_WIFI, null).also {
+                AppLog.d(LOG_AREA, "resolveSnapshot: no active network")
+            }
         val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork)
-            ?: return ConnectionSnapshot(ConnectionState.NON_WIFI, null)
+            ?: return ConnectionSnapshot(ConnectionState.NON_WIFI, null).also {
+                AppLog.d(LOG_AREA, "resolveSnapshot: no network capabilities")
+            }
 
-        return if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+        val snapshot = if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
             ConnectionSnapshot(
                 connectionState = ConnectionState.WIFI,
                 currentWifiSsid = readCurrentWifiSsid(capabilities),
@@ -65,19 +70,28 @@ class ConnectionStateResolver(context: Context) {
         } else {
             ConnectionSnapshot(ConnectionState.NON_WIFI, null)
         }
+        AppLog.d(
+            LOG_AREA,
+            "resolveSnapshot: connection=${snapshot.connectionState} ssid=${snapshot.currentWifiSsid}",
+        )
+        return snapshot
     }
 
     private fun readCurrentWifiSsid(capabilities: NetworkCapabilities): String? {
         if (!hasWifiSsidPermissions()) {
+            AppLog.w(LOG_AREA, "readCurrentWifiSsid: missing permission or location is disabled")
             return null
         }
 
         val transportSsid = (capabilities.transportInfo as? WifiInfo)?.let(::sanitizeSsid)
         if (transportSsid != null) {
+            AppLog.d(LOG_AREA, "readCurrentWifiSsid: using transportInfo ssid=$transportSsid")
             return transportSsid
         }
 
-        return wifiManager?.connectionInfo?.let(::sanitizeSsid)
+        val wifiManagerSsid = wifiManager?.connectionInfo?.let(::sanitizeSsid)
+        AppLog.d(LOG_AREA, "readCurrentWifiSsid: using WifiManager ssid=$wifiManagerSsid")
+        return wifiManagerSsid
     }
 
     private fun sanitizeSsid(wifiInfo: WifiInfo): String? {
@@ -112,6 +126,7 @@ class ConnectionStateResolver(context: Context) {
     }
 
     private companion object {
+        private const val LOG_AREA = "ConnectionState"
         const val UNKNOWN_SSID = "<unknown ssid>"
     }
 }

@@ -39,13 +39,16 @@ import com.example.wifi_volume.R
 import com.example.wifi_volume.audio.VolumeController
 import com.example.wifi_volume.bluetooth.BluetoothStateResolver
 import com.example.wifi_volume.data.SettingsRepository
+import com.example.wifi_volume.model.ConditionStateRetentionPolicy
+import com.example.wifi_volume.log.AppLog
 import com.example.wifi_volume.model.DeviceState
-import com.example.wifi_volume.model.ReapplyMode
-import com.example.wifi_volume.model.RuleConditionType
-import com.example.wifi_volume.model.RuleConfig
-import com.example.wifi_volume.model.RuleEvaluator
-import com.example.wifi_volume.model.RuleEvaluator.ResolvedRule
 import com.example.wifi_volume.network.ConnectionStateResolver
+import com.example.wifi_volume.usecase.DeviceStateProvider
+import com.example.wifi_volume.usecase.ElapsedTimeProvider
+import com.example.wifi_volume.usecase.EvaluateAndApplyRuleUseCase
+import com.example.wifi_volume.usecase.RuleChangeNotifier
+import com.example.wifi_volume.usecase.SettingsStore
+import com.example.wifi_volume.usecase.VolumeProfileApplier
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -63,7 +66,7 @@ class ConnectionMonitorService : Service() {
     private lateinit var volumeController: VolumeController
     private lateinit var connectionStateResolver: ConnectionStateResolver
     private lateinit var bluetoothStateResolver: BluetoothStateResolver
-    private val ruleEvaluator = RuleEvaluator()
+    private lateinit var evaluateAndApplyRuleUseCase: EvaluateAndApplyRuleUseCase
     private var pendingEvaluationJob: Job? = null
     private var watchdogJob: Job? = null
 
@@ -72,6 +75,7 @@ class ConnectionMonitorService : Service() {
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
+            AppLog.i(LOG_AREA, "networkCallback.onAvailable")
             requestRuleEvaluation()
         }
 
@@ -79,16 +83,19 @@ class ConnectionMonitorService : Service() {
             network: Network,
             networkCapabilities: NetworkCapabilities,
         ) {
+            AppLog.i(LOG_AREA, "networkCallback.onCapabilitiesChanged")
             requestRuleEvaluation()
         }
 
         override fun onLost(network: Network) {
+            AppLog.i(LOG_AREA, "networkCallback.onLost")
             requestRuleEvaluation()
         }
     }
 
     private val bluetoothReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            AppLog.i(LOG_AREA, "bluetoothReceiver.onReceive action=${intent?.action}")
             when (intent?.action) {
                 BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED,
                 BluetoothAdapter.ACTION_STATE_CHANGED,
@@ -101,10 +108,48 @@ class ConnectionMonitorService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        AppLog.i(LOG_AREA, "onCreate")
         settingsRepository = SettingsRepository(applicationContext)
         volumeController = VolumeController(applicationContext)
         connectionStateResolver = ConnectionStateResolver(applicationContext)
         bluetoothStateResolver = BluetoothStateResolver(applicationContext)
+        evaluateAndApplyRuleUseCase = EvaluateAndApplyRuleUseCase(
+            deviceStateProvider = object : DeviceStateProvider {
+                override suspend fun getCurrentDeviceState(): DeviceState {
+                    val connectionSnapshot = connectionStateResolver.resolveSnapshot()
+                    return DeviceState(
+                        connectionState = connectionSnapshot.connectionState,
+                        currentWifiSsid = connectionSnapshot.currentWifiSsid,
+                        connectedBluetoothDevices = bluetoothStateResolver.getConnectedDevices(),
+                    )
+                }
+            },
+            settingsStore = object : SettingsStore {
+                override suspend fun getSettings() = settingsRepository.getSettings()
+
+                override suspend fun getActiveRuleState() = settingsRepository.getActiveRuleState()
+
+                override suspend fun setActiveRuleState(ruleId: String, label: String) {
+                    settingsRepository.setActiveRuleState(ruleId, label)
+                }
+            },
+            volumeProfileApplier = object : VolumeProfileApplier {
+                override fun applyProfile(profile: com.example.wifi_volume.model.VolumeProfile) {
+                    volumeController.applyProfile(profile)
+                }
+            },
+            ruleChangeNotifier = object : RuleChangeNotifier {
+                override fun notifyRuleChanged(ruleLabel: String) {
+                    showRuleChangeNotification(ruleLabel)
+                }
+            },
+            elapsedTimeProvider = ElapsedTimeProvider {
+                android.os.SystemClock.elapsedRealtime()
+            },
+            conditionStateRetentionPolicy = ConditionStateRetentionPolicy(
+                WIFI_RULE_HOLD_MS,
+            ),
+        )
 
         createNotificationChannel()
         startForeground(
@@ -113,6 +158,7 @@ class ConnectionMonitorService : Service() {
         )
         serviceScope.launch {
             settingsRepository.activeRuleStateFlow.collectLatest { activeRuleState ->
+                AppLog.d(LOG_AREA, "activeRuleStateFlow: ruleId=${activeRuleState.ruleId} label=${activeRuleState.label}")
                 val message = activeRuleState.label?.let {
                     getString(R.string.notification_active_rule, it)
                 } ?: getString(R.string.notification_initializing)
@@ -123,9 +169,11 @@ class ConnectionMonitorService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        AppLog.i(LOG_AREA, "onStartCommand flags=$flags startId=$startId")
         if (!isNetworkCallbackRegistered) {
             connectionStateResolver.connectivityManager.registerDefaultNetworkCallback(networkCallback)
             isNetworkCallbackRegistered = true
+            AppLog.i(LOG_AREA, "registered default network callback")
         }
         if (!isBluetoothReceiverRegistered) {
             registerReceiver(
@@ -139,14 +187,17 @@ class ConnectionMonitorService : Service() {
                 RECEIVER_NOT_EXPORTED,
             )
             isBluetoothReceiverRegistered = true
+            AppLog.i(LOG_AREA, "registered bluetooth receiver")
         }
         if (watchdogJob == null) {
             watchdogJob = serviceScope.launch {
                 while (isActive) {
                     delay(WATCHDOG_INTERVAL_MS)
+                    AppLog.d(LOG_AREA, "watchdog tick")
                     requestRuleEvaluation(immediate = true)
                 }
             }
+            AppLog.i(LOG_AREA, "started watchdog")
         }
 
         requestRuleEvaluation(immediate = true)
@@ -154,6 +205,7 @@ class ConnectionMonitorService : Service() {
     }
 
     override fun onDestroy() {
+        AppLog.w(LOG_AREA, "onDestroy")
         if (isNetworkCallbackRegistered) {
             connectionStateResolver.connectivityManager.unregisterNetworkCallback(networkCallback)
         }
@@ -169,80 +221,23 @@ class ConnectionMonitorService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun requestRuleEvaluation(immediate: Boolean = false) {
+        AppLog.d(LOG_AREA, "requestRuleEvaluation immediate=$immediate")
         pendingEvaluationJob?.cancel()
         pendingEvaluationJob = serviceScope.launch {
             if (!immediate) {
                 delay(EVENT_STABILIZE_DELAY_MS)
             }
-            val settings = settingsRepository.getSettings() ?: return@launch
-            val previousActiveRuleId = settingsRepository.getActiveRuleId()
-            val connectionSnapshot = connectionStateResolver.resolveSnapshot()
-            val deviceState = DeviceState(
-                connectionState = connectionSnapshot.connectionState,
-                currentWifiSsid = connectionSnapshot.currentWifiSsid,
-                connectedBluetoothDevices = bluetoothStateResolver.getConnectedDevices(),
-            )
-            val activeRule = ruleEvaluator.resolveActiveRule(
-                settings = settings,
-                deviceState = deviceState,
-            )
-            val resolvedRule = retainPreviousWifiRuleIfNeeded(
-                activeRule = activeRule,
-                previousActiveRuleId = previousActiveRuleId,
-                settings = settings,
-                deviceState = deviceState,
-            )
-            val shouldApply = when (settings.reapplyMode) {
-                ReapplyMode.ALWAYS -> true
-                ReapplyMode.ON_CHANGE_ONLY -> settingsRepository.getActiveRuleId() != resolvedRule.rule.id
-            }
-
-            if (shouldApply) {
-                volumeController.applyProfile(resolvedRule.rule.volumeProfile)
-            }
-            settingsRepository.setActiveRuleState(resolvedRule.rule.id, resolvedRule.displayLabel)
-            if (settings.notifyOnRuleChange &&
-                previousActiveRuleId != null &&
-                previousActiveRuleId != resolvedRule.rule.id
-            ) {
-                showRuleChangeNotification(resolvedRule.displayLabel)
+            runCatching {
+                evaluateAndApplyRuleUseCase.execute()
+            }.onSuccess { result ->
+                AppLog.i(
+                    LOG_AREA,
+                    "evaluation result=${result?.displayLabel} applied=${result?.appliedProfile} notified=${result?.notifiedRuleChange}",
+                )
+            }.onFailure { error ->
+                AppLog.e(LOG_AREA, "rule evaluation failed", error)
             }
         }
-    }
-
-    private fun retainPreviousWifiRuleIfNeeded(
-        activeRule: ResolvedRule,
-        previousActiveRuleId: String?,
-        settings: com.example.wifi_volume.model.AppSettings,
-        deviceState: DeviceState,
-    ): ResolvedRule {
-        if (!activeRule.rule.isFallback) {
-            return activeRule
-        }
-        if (deviceState.connectionState != com.example.wifi_volume.network.ConnectionState.WIFI) {
-            return activeRule
-        }
-        if (deviceState.currentWifiSsid != null) {
-            return activeRule
-        }
-
-        val previousRule = settings.findRule(previousActiveRuleId)
-            ?.takeIf(::hasWifiSpecificCondition)
-            ?: return activeRule
-
-        val fallbackLabel = previousRule.name.ifBlank {
-            previousRule.conditions.firstOrNull { it.type == RuleConditionType.WIFI_SSID }?.label
-                ?: activeRule.displayLabel
-        }
-        return ResolvedRule(
-            rule = previousRule,
-            matchedLabel = fallbackLabel,
-            displayLabel = fallbackLabel,
-        )
-    }
-
-    private fun hasWifiSpecificCondition(rule: RuleConfig): Boolean {
-        return !rule.isFallback && rule.conditions.any { it.type == RuleConditionType.WIFI_SSID }
     }
 
     private fun buildNotification(message: String): Notification {
@@ -279,6 +274,7 @@ class ConnectionMonitorService : Service() {
     }
 
     private fun showRuleChangeNotification(ruleLabel: String) {
+        AppLog.i(LOG_AREA, "showRuleChangeNotification label=$ruleLabel")
         getSystemService(NotificationManager::class.java).notify(
             CHANGE_NOTIFICATION_ID,
             NotificationCompat.Builder(this, CHANGE_NOTIFICATION_CHANNEL_ID)
@@ -291,11 +287,13 @@ class ConnectionMonitorService : Service() {
     }
 
     private companion object {
+        private const val LOG_AREA = "MonitorService"
         const val NOTIFICATION_CHANNEL_ID = "connection_monitor"
         const val NOTIFICATION_ID = 1001
         const val CHANGE_NOTIFICATION_CHANNEL_ID = "rule_change"
         const val CHANGE_NOTIFICATION_ID = 1002
         const val EVENT_STABILIZE_DELAY_MS = 1200L
         const val WATCHDOG_INTERVAL_MS = 10_000L
+        const val WIFI_RULE_HOLD_MS = 5_000L
     }
 }

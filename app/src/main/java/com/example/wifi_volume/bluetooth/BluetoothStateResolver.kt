@@ -25,7 +25,9 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
+import com.example.wifi_volume.log.AppLog
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 
 class BluetoothStateResolver(context: Context) {
@@ -38,12 +40,13 @@ class BluetoothStateResolver(context: Context) {
     suspend fun getConnectedDevices(): List<ConnectedBluetoothDevice> {
         val adapter = bluetoothAdapter ?: return emptyList()
         if (!hasBluetoothConnectPermission()) {
+            AppLog.w(LOG_AREA, "getConnectedDevices: missing BLUETOOTH_CONNECT permission")
             return emptyList()
         }
 
         val devicesByAddress = linkedMapOf<String, ConnectedBluetoothDevice>()
         connectedProfiles().forEach { profile ->
-            fetchConnectedDevices(adapter, profile).forEach { device ->
+            fetchConnectedDevicesWithTimeout(adapter, profile).forEach { device ->
                 devicesByAddress.putIfAbsent(
                     device.address,
                     ConnectedBluetoothDevice(
@@ -53,7 +56,9 @@ class BluetoothStateResolver(context: Context) {
                 )
             }
         }
-        return devicesByAddress.values.toList()
+        return devicesByAddress.values.toList().also { devices ->
+            AppLog.d(LOG_AREA, "getConnectedDevices: devices=${devices.map { it.displayName }}")
+        }
     }
 
     suspend fun isAnyDeviceConnected(): Boolean {
@@ -68,6 +73,17 @@ class BluetoothStateResolver(context: Context) {
             appContext,
             Manifest.permission.BLUETOOTH_CONNECT,
         ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private suspend fun fetchConnectedDevicesWithTimeout(
+        adapter: BluetoothAdapter,
+        profile: Int,
+    ): List<android.bluetooth.BluetoothDevice> {
+        return withTimeoutOrNull(PROFILE_PROXY_TIMEOUT_MS) {
+            fetchConnectedDevices(adapter, profile)
+        } ?: emptyList<android.bluetooth.BluetoothDevice>().also {
+            AppLog.w(LOG_AREA, "fetchConnectedDevicesWithTimeout: timeout profile=$profile")
+        }
     }
 
     private suspend fun fetchConnectedDevices(
@@ -104,5 +120,10 @@ class BluetoothStateResolver(context: Context) {
             BluetoothProfile.HEARING_AID,
             BluetoothProfile.LE_AUDIO,
         )
+    }
+
+    private companion object {
+        private const val LOG_AREA = "BluetoothState"
+        const val PROFILE_PROXY_TIMEOUT_MS = 1_500L
     }
 }

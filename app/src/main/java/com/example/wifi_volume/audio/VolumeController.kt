@@ -19,6 +19,7 @@ package com.example.wifi_volume.audio
 
 import android.content.Context
 import android.media.AudioManager
+import com.example.wifi_volume.log.AppLog
 import com.example.wifi_volume.model.RingerModeOption
 import com.example.wifi_volume.model.VolumeLimits
 import com.example.wifi_volume.model.VolumeProfile
@@ -35,7 +36,9 @@ class VolumeController(context: Context) {
             notification = audioManager.getStreamVolume(AudioManager.STREAM_NOTIFICATION),
             alarm = audioManager.getStreamVolume(AudioManager.STREAM_ALARM),
             ringerMode = RingerModeOption.fromAudioManagerValue(audioManager.ringerMode),
-        )
+        ).also { profile ->
+            AppLog.d(LOG_AREA, "readCurrentProfile: $profile")
+        }
     }
 
     fun readLimits(): VolumeLimits {
@@ -48,6 +51,7 @@ class VolumeController(context: Context) {
     }
 
     fun applyProfile(profile: VolumeProfile) {
+        AppLog.i(LOG_AREA, "applyProfile: $profile")
         setStreamVolume(AudioManager.STREAM_MUSIC, profile.media)
         setStreamVolume(AudioManager.STREAM_RING, profile.ring)
         setStreamVolume(AudioManager.STREAM_NOTIFICATION, profile.notification)
@@ -61,6 +65,11 @@ class VolumeController(context: Context) {
         val boundedValue = value.coerceIn(0, audioManager.getStreamMaxVolume(streamType))
         runCatching {
             audioManager.setStreamVolume(streamType, boundedValue, 0)
+            AppLog.d(LOG_AREA, "setStreamVolume: streamType=$streamType value=$boundedValue")
         }
+    }
+
+    private companion object {
+        private const val LOG_AREA = "VolumeController"
     }
 }

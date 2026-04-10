@@ -117,6 +117,10 @@ data class DeviceState(
     val connectedBluetoothDevices: List<ConnectedBluetoothDevice>,
 )
 
+data class ConditionRetentionState(
+    val lastMatchedAtByCondition: Map<String, Long> = emptyMap(),
+)
+
 class RuleEvaluator {
     fun resolveActiveRule(settings: AppSettings, deviceState: DeviceState): ResolvedRule {
         settings.sortedRules().forEach { rule ->
@@ -161,5 +165,127 @@ class RuleEvaluator {
 
     companion object {
         const val FALLBACK_LABEL = "その他"
+    }
+}
+
+class ConditionStateRetentionPolicy(
+    private val holdMs: Long,
+) {
+    fun resolveActiveRule(
+        settings: AppSettings,
+        deviceState: DeviceState,
+        state: ConditionRetentionState,
+        nowMs: Long,
+    ): RetainedResolution {
+        val nextMatchedAtByCondition = state.lastMatchedAtByCondition
+            .filterValues { lastMatchedAt -> nowMs - lastMatchedAt <= holdMs }
+            .toMutableMap()
+        val effectiveMatchByCondition = mutableMapOf<String, Boolean>()
+
+        settings.sortedRules()
+            .filterNot { it.isFallback }
+            .forEach { rule ->
+                rule.conditions.forEach { condition ->
+                    val conditionKey = condition.key()
+                    effectiveMatchByCondition[conditionKey] = when (evaluateCondition(condition, deviceState)) {
+                        ConditionMatchResult.MATCHED -> {
+                            nextMatchedAtByCondition[conditionKey] = nowMs
+                            true
+                        }
+
+                        ConditionMatchResult.UNKNOWN ->
+                            nextMatchedAtByCondition[conditionKey]
+                                ?.let { lastMatchedAt -> nowMs - lastMatchedAt <= holdMs }
+                                ?: false
+
+                        ConditionMatchResult.NOT_MATCHED -> false
+                    }
+                }
+            }
+
+        settings.sortedRules().forEach { rule ->
+            if (rule.isFallback) {
+                return@forEach
+            }
+            val matchedCondition = rule.conditions.firstOrNull { condition ->
+                effectiveMatchByCondition[condition.key()] == true
+            }
+
+            if (matchedCondition != null) {
+                return RetainedResolution(
+                    resolvedRule = RuleEvaluator.ResolvedRule(
+                        rule = rule,
+                        matchedLabel = matchedCondition.label,
+                        displayLabel = rule.name.ifBlank { matchedCondition.label },
+                    ),
+                    nextState = ConditionRetentionState(nextMatchedAtByCondition.toMap()),
+                )
+            }
+        }
+
+        val fallbackRule = settings.fallbackRule()
+        return RetainedResolution(
+            resolvedRule = RuleEvaluator.ResolvedRule(
+                rule = fallbackRule,
+                matchedLabel = RuleEvaluator.FALLBACK_LABEL,
+                displayLabel = fallbackRule.name.ifBlank { RuleEvaluator.FALLBACK_LABEL },
+            ),
+            nextState = ConditionRetentionState(nextMatchedAtByCondition.toMap()),
+        )
+    }
+
+    private fun evaluateCondition(
+        condition: RuleCondition,
+        deviceState: DeviceState,
+    ): ConditionMatchResult {
+        return when (condition.type) {
+            RuleConditionType.WIFI_ANY -> {
+                if (deviceState.connectionState == ConnectionState.WIFI) {
+                    ConditionMatchResult.MATCHED
+                } else {
+                    ConditionMatchResult.NOT_MATCHED
+                }
+            }
+
+            RuleConditionType.WIFI_SSID -> when {
+                deviceState.connectionState != ConnectionState.WIFI -> ConditionMatchResult.NOT_MATCHED
+                deviceState.currentWifiSsid == null -> ConditionMatchResult.UNKNOWN
+                condition.value == deviceState.currentWifiSsid -> ConditionMatchResult.MATCHED
+                else -> ConditionMatchResult.NOT_MATCHED
+            }
+
+            RuleConditionType.BLUETOOTH_ANY -> {
+                if (deviceState.connectedBluetoothDevices.isNotEmpty()) {
+                    ConditionMatchResult.MATCHED
+                } else {
+                    ConditionMatchResult.NOT_MATCHED
+                }
+            }
+
+            RuleConditionType.BLUETOOTH_DEVICE -> {
+                if (condition.value != null &&
+                    deviceState.connectedBluetoothDevices.any { it.address == condition.value }
+                ) {
+                    ConditionMatchResult.MATCHED
+                } else {
+                    ConditionMatchResult.NOT_MATCHED
+                }
+            }
+        }
+    }
+
+    private fun RuleCondition.key(): String {
+        return "${type.name}:${value.orEmpty()}"
+    }
+
+    data class RetainedResolution(
+        val resolvedRule: RuleEvaluator.ResolvedRule,
+        val nextState: ConditionRetentionState,
+    )
+
+    private enum class ConditionMatchResult {
+        MATCHED,
+        NOT_MATCHED,
+        UNKNOWN,
     }
 }

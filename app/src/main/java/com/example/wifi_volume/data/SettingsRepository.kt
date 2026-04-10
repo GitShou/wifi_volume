@@ -24,6 +24,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.wifi_volume.log.AppLog
 import com.example.wifi_volume.model.ActiveRuleState
 import com.example.wifi_volume.model.AppSettings
 import com.example.wifi_volume.model.ReapplyMode
@@ -56,26 +57,39 @@ class SettingsRepository(private val context: Context) {
     suspend fun ensureInitialized(defaultProfile: VolumeProfile) {
         val preferences = dataStore.data.first()
         if (preferences.contains(Keys.SETTINGS_JSON)) {
+            AppLog.d(LOG_AREA, "ensureInitialized: already initialized")
             return
         }
+        AppLog.i(LOG_AREA, "ensureInitialized: creating default settings")
         saveSettings(migrateOrCreateDefaults(preferences, defaultProfile))
     }
 
     suspend fun getSettings(): AppSettings? {
         val preferences = dataStore.data.first()
         val rawJson = preferences[Keys.SETTINGS_JSON] ?: return null
-        return decodeSettings(rawJson)
+        return SettingsJsonCodec.decode(rawJson).also { settings ->
+            AppLog.d(LOG_AREA, "getSettings: loaded ${settings.rules.size} rules")
+        }
     }
 
     suspend fun saveSettings(settings: AppSettings) {
         dataStore.edit { preferences ->
-            preferences[Keys.SETTINGS_JSON] = encodeSettings(settings)
+            preferences[Keys.SETTINGS_JSON] = SettingsJsonCodec.encode(settings)
         }
+        AppLog.i(LOG_AREA, "saveSettings: saved ${settings.rules.size} rules reapply=${settings.reapplyMode} notify=${settings.notifyOnRuleChange}")
     }
 
     suspend fun getActiveRuleId(): String? {
         val preferences = dataStore.data.first()
         return preferences[Keys.ACTIVE_RULE_ID]
+    }
+
+    suspend fun getActiveRuleState(): ActiveRuleState {
+        val preferences = dataStore.data.first()
+        return ActiveRuleState(
+            ruleId = preferences[Keys.ACTIVE_RULE_ID],
+            label = preferences[Keys.ACTIVE_RULE_LABEL],
+        )
     }
 
     suspend fun setActiveRuleId(ruleId: String) {
@@ -89,6 +103,7 @@ class SettingsRepository(private val context: Context) {
             preferences[Keys.ACTIVE_RULE_ID] = ruleId
             preferences[Keys.ACTIVE_RULE_LABEL] = label
         }
+        AppLog.d(LOG_AREA, "setActiveRuleState: ruleId=$ruleId label=$label")
     }
 
     private fun migrateOrCreateDefaults(
@@ -156,7 +171,7 @@ class SettingsRepository(private val context: Context) {
                     profile = mobileProfile,
                 ),
             ),
-            reapplyMode = decodeReapplyMode(preferences[LegacyKeys.REAPPLY_MODE]),
+            reapplyMode = SettingsJsonCodec.decodeReapplyMode(preferences[LegacyKeys.REAPPLY_MODE]),
             notifyOnRuleChange = false,
         )
     }
@@ -220,11 +235,53 @@ class SettingsRepository(private val context: Context) {
             ring = preferences[ringKey] ?: 0,
             notification = preferences[notificationKey] ?: 0,
             alarm = preferences[alarmKey] ?: 0,
-            ringerMode = decodeRingerMode(preferences[ringerModeKey]),
+            ringerMode = SettingsJsonCodec.decodeRingerMode(preferences[ringerModeKey]),
         )
     }
 
-    private fun encodeSettings(settings: AppSettings): String {
+    private object Keys {
+        val SETTINGS_JSON = stringPreferencesKey("settings_json")
+        val ACTIVE_RULE_ID = stringPreferencesKey("active_rule_id")
+        val ACTIVE_RULE_LABEL = stringPreferencesKey("active_rule_label")
+    }
+
+    private object LegacyKeys {
+        val BLUETOOTH_MEDIA = intPreferencesKey("bluetooth_media")
+        val BLUETOOTH_RING = intPreferencesKey("bluetooth_ring")
+        val BLUETOOTH_NOTIFICATION = intPreferencesKey("bluetooth_notification")
+        val BLUETOOTH_ALARM = intPreferencesKey("bluetooth_alarm")
+        val BLUETOOTH_RINGER_MODE = stringPreferencesKey("bluetooth_ringer_mode")
+        val BLUETOOTH_PRIORITY = intPreferencesKey("bluetooth_priority")
+        val WIFI_MEDIA = intPreferencesKey("wifi_media")
+        val WIFI_RING = intPreferencesKey("wifi_ring")
+        val WIFI_NOTIFICATION = intPreferencesKey("wifi_notification")
+        val WIFI_ALARM = intPreferencesKey("wifi_alarm")
+        val WIFI_RINGER_MODE = stringPreferencesKey("wifi_ringer_mode")
+        val WIFI_PRIORITY = intPreferencesKey("wifi_priority")
+        val MOBILE_MEDIA = intPreferencesKey("mobile_media")
+        val MOBILE_RING = intPreferencesKey("mobile_ring")
+        val MOBILE_NOTIFICATION = intPreferencesKey("mobile_notification")
+        val MOBILE_ALARM = intPreferencesKey("mobile_alarm")
+        val MOBILE_RINGER_MODE = stringPreferencesKey("mobile_ringer_mode")
+        val MOBILE_PRIORITY = intPreferencesKey("mobile_priority")
+        val REAPPLY_MODE = stringPreferencesKey("reapply_mode")
+    }
+
+    private companion object {
+        private const val LOG_AREA = "SettingsRepository"
+        const val DEFAULT_BLUETOOTH_PRIORITY = 1
+        const val DEFAULT_WIFI_PRIORITY = 2
+        const val DEFAULT_MOBILE_PRIORITY = 3
+
+        const val LABEL_BLUETOOTH_ANY = "Bluetooth接続時"
+        const val LABEL_WIFI_ANY = "Wi-Fi通信時"
+    }
+}
+
+internal object SettingsJsonCodec {
+    private const val LEGACY_FALLBACK_TYPE = "MOBILE_DEFAULT"
+
+    fun encode(settings: AppSettings): String {
         return JSONObject().apply {
             put("reapplyMode", settings.reapplyMode.name)
             put("notifyOnRuleChange", settings.notifyOnRuleChange)
@@ -265,7 +322,7 @@ class SettingsRepository(private val context: Context) {
         }.toString()
     }
 
-    private fun decodeSettings(rawJson: String): AppSettings {
+    fun decode(rawJson: String): AppSettings {
         val root = JSONObject(rawJson)
         val rulesArray = root.getJSONArray("rules")
         val rules = buildList {
@@ -348,51 +405,13 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
-    private fun decodeRingerMode(rawValue: String?): RingerModeOption {
+    internal fun decodeRingerMode(rawValue: String?): RingerModeOption {
         return runCatching { rawValue?.let(RingerModeOption::valueOf) }.getOrNull()
             ?: RingerModeOption.NORMAL
     }
 
-    private fun decodeReapplyMode(rawValue: String?): ReapplyMode {
+    internal fun decodeReapplyMode(rawValue: String?): ReapplyMode {
         return runCatching { rawValue?.let(ReapplyMode::valueOf) }.getOrNull()
             ?: ReapplyMode.ON_CHANGE_ONLY
-    }
-
-    private object Keys {
-        val SETTINGS_JSON = stringPreferencesKey("settings_json")
-        val ACTIVE_RULE_ID = stringPreferencesKey("active_rule_id")
-        val ACTIVE_RULE_LABEL = stringPreferencesKey("active_rule_label")
-    }
-
-    private object LegacyKeys {
-        val BLUETOOTH_MEDIA = intPreferencesKey("bluetooth_media")
-        val BLUETOOTH_RING = intPreferencesKey("bluetooth_ring")
-        val BLUETOOTH_NOTIFICATION = intPreferencesKey("bluetooth_notification")
-        val BLUETOOTH_ALARM = intPreferencesKey("bluetooth_alarm")
-        val BLUETOOTH_RINGER_MODE = stringPreferencesKey("bluetooth_ringer_mode")
-        val BLUETOOTH_PRIORITY = intPreferencesKey("bluetooth_priority")
-        val WIFI_MEDIA = intPreferencesKey("wifi_media")
-        val WIFI_RING = intPreferencesKey("wifi_ring")
-        val WIFI_NOTIFICATION = intPreferencesKey("wifi_notification")
-        val WIFI_ALARM = intPreferencesKey("wifi_alarm")
-        val WIFI_RINGER_MODE = stringPreferencesKey("wifi_ringer_mode")
-        val WIFI_PRIORITY = intPreferencesKey("wifi_priority")
-        val MOBILE_MEDIA = intPreferencesKey("mobile_media")
-        val MOBILE_RING = intPreferencesKey("mobile_ring")
-        val MOBILE_NOTIFICATION = intPreferencesKey("mobile_notification")
-        val MOBILE_ALARM = intPreferencesKey("mobile_alarm")
-        val MOBILE_RINGER_MODE = stringPreferencesKey("mobile_ringer_mode")
-        val MOBILE_PRIORITY = intPreferencesKey("mobile_priority")
-        val REAPPLY_MODE = stringPreferencesKey("reapply_mode")
-    }
-
-    private companion object {
-        const val DEFAULT_BLUETOOTH_PRIORITY = 1
-        const val DEFAULT_WIFI_PRIORITY = 2
-        const val DEFAULT_MOBILE_PRIORITY = 3
-
-        const val LABEL_BLUETOOTH_ANY = "Bluetooth接続時"
-        const val LABEL_WIFI_ANY = "Wi-Fi通信時"
-        const val LEGACY_FALLBACK_TYPE = "MOBILE_DEFAULT"
     }
 }

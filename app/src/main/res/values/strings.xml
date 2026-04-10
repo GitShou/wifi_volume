@@ -65,6 +65,7 @@
     <string name="dialog_delete_setting_message">%1$s を削除します。よろしいですか？</string>
     <string name="dialog_permission_settings_title">権限を手動で許可してください</string>
     <string name="dialog_permission_settings_message">この権限は端末の設定画面から有効にしてください。</string>
+    <string name="dialog_background_permission_settings_message">バックグラウンド中に Wi-Fi 名を判定するため、設定画面で「常に許可」の位置情報権限を有効にしてください。</string>
     <string name="dialog_ok">OK</string>
     <string name="dialog_cancel">キャンセル</string>
     <string name="action_open_settings">設定を開く</string>

@@ -46,6 +46,7 @@ import com.google.android.material.card.MaterialCardView
 import com.example.wifi_volume.audio.VolumeController
 import com.example.wifi_volume.bluetooth.BluetoothStateResolver
 import com.example.wifi_volume.data.SettingsRepository
+import com.example.wifi_volume.log.AppLog
 import com.example.wifi_volume.model.AppSettings
 import com.example.wifi_volume.model.DeviceState
 import com.example.wifi_volume.model.ReapplyMode
@@ -97,8 +98,13 @@ class MainActivity : AppCompatActivity() {
     private val permissionsLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
             val deniedPermissions = result.filterValues { granted -> !granted }.keys
+            AppLog.i(LOG_AREA, "standard permission result: granted=${result.filterValues { it }.keys} denied=$deniedPermissions")
             when {
                 deniedPermissions.isEmpty() -> {
+                    val requestedBackground = requestBackgroundLocationPermissionIfNeeded(fromExplicitAction = false)
+                    if (requestedBackground) {
+                        return@registerForActivityResult
+                    }
                     Toast.makeText(
                         this,
                         getString(R.string.toast_permissions_granted),
@@ -122,8 +128,35 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+    private val backgroundLocationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            AppLog.i(LOG_AREA, "background location permission result: granted=$granted")
+            when {
+                granted -> {
+                    Toast.makeText(
+                        this,
+                        getString(R.string.toast_permissions_granted),
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+
+                !shouldShowRequestPermissionRationale(Manifest.permission.ACCESS_BACKGROUND_LOCATION) -> {
+                    showPermissionSettingsDialog(R.string.dialog_background_permission_settings_message)
+                }
+
+                else -> {
+                    Toast.makeText(
+                        this,
+                        getString(R.string.toast_permissions_missing),
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppLog.i(LOG_AREA, "onCreate")
         enableEdgeToEdge()
         setContentView(R.layout.activity_main)
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { view, insets ->
@@ -141,8 +174,12 @@ class MainActivity : AppCompatActivity() {
         bindViews()
         initializeSettings()
         observeActiveRule()
-        requestPermissionsIfNeeded()
-        startMonitoringService()
+        if (!intent.getBooleanExtra(EXTRA_SKIP_PERMISSION_REQUESTS, false)) {
+            requestPermissionsIfNeeded()
+        }
+        if (!intent.getBooleanExtra(EXTRA_SKIP_MONITORING_SERVICE_START, false)) {
+            startMonitoringService()
+        }
     }
 
     private fun bindViews() {
@@ -196,8 +233,10 @@ class MainActivity : AppCompatActivity() {
     private fun initializeSettings() {
         lifecycleScope.launch {
             val currentProfile = volumeController.readCurrentProfile()
+            AppLog.d(LOG_AREA, "initializeSettings: currentProfile=$currentProfile")
             settingsRepository.ensureInitialized(currentProfile)
             val settings = settingsRepository.getSettings() ?: return@launch
+            AppLog.d(LOG_AREA, "initializeSettings: loaded ${settings.rules.size} rules reapply=${settings.reapplyMode} notify=${settings.notifyOnRuleChange}")
             editableRules.clear()
             editableRules.addAll(settings.sortedRules())
             reapplySwitch.isChecked = settings.reapplyMode == ReapplyMode.ALWAYS
@@ -320,6 +359,7 @@ class MainActivity : AppCompatActivity() {
     private fun saveAndApplySettings() {
         lifecycleScope.launch {
             runCatching {
+                AppLog.i(LOG_AREA, "saveAndApplySettings: start")
                 syncEditableRulesFromViews()
                 validateRules(editableRules)
                 normalizeMobileRulePriority(editableRules)
@@ -337,8 +377,10 @@ class MainActivity : AppCompatActivity() {
                     notifyOnRuleChange = ruleChangeNotificationSwitch.isChecked,
                 )
                 settingsRepository.saveSettings(settings)
+                AppLog.d(LOG_AREA, "saveAndApplySettings: saved ${settings.rules.size} rules")
 
                 val activeRule = resolveActiveRule(settings)
+                AppLog.i(LOG_AREA, "saveAndApplySettings: resolved active rule id=${activeRule.rule.id} label=${activeRule.displayLabel}")
                 volumeController.applyProfile(activeRule.rule.volumeProfile)
                 settingsRepository.setActiveRuleState(activeRule.rule.id, activeRule.displayLabel)
 
@@ -346,12 +388,14 @@ class MainActivity : AppCompatActivity() {
                 editableRules.addAll(settings.sortedRules())
                 renderRules()
             }.onSuccess {
+                AppLog.i(LOG_AREA, "saveAndApplySettings: success")
                 Toast.makeText(
                     this@MainActivity,
                     getString(R.string.toast_saved),
                     Toast.LENGTH_SHORT,
                 ).show()
             }.onFailure {
+                AppLog.e(LOG_AREA, "saveAndApplySettings: failed", it)
                 Toast.makeText(
                     this@MainActivity,
                     it.message ?: getString(R.string.toast_error),
@@ -450,7 +494,7 @@ class MainActivity : AppCompatActivity() {
     private fun showAddConditionDialog(targetRuleId: String) {
         lifecycleScope.launch {
             val deviceState = currentDeviceState()
-            val candidates = buildAddableConditions(deviceState)
+            val candidates = buildAddableConditions(targetRuleId, deviceState)
             if (candidates.isEmpty()) {
                 Toast.makeText(
                     this@MainActivity,
@@ -470,11 +514,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun buildAddableConditions(deviceState: DeviceState): List<AddConditionCandidate> {
+    private fun buildAddableConditions(
+        targetRuleId: String,
+        deviceState: DeviceState,
+    ): List<AddConditionCandidate> {
         val existingConditionKeys = editableRules
-            .flatMap { it.conditions }
-            .map(::conditionKey)
-            .toSet()
+            .firstOrNull { it.id == targetRuleId }
+            ?.conditions
+            ?.map(::conditionKey)
+            ?.toSet()
+            .orEmpty()
         val candidates = mutableListOf<AddConditionCandidate>()
 
         deviceState.currentWifiSsid
@@ -615,7 +664,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private suspend fun resolveActiveRule(settings: AppSettings): ResolvedRule {
-        return ruleEvaluator.resolveActiveRule(settings, currentDeviceState())
+        val deviceState = currentDeviceState()
+        val resolvedRule = ruleEvaluator.resolveActiveRule(settings, deviceState)
+        AppLog.d(
+            LOG_AREA,
+            "resolveActiveRule: connection=${deviceState.connectionState} ssid=${deviceState.currentWifiSsid} bt=${deviceState.connectedBluetoothDevices.map { it.displayName }} -> ${resolvedRule.displayLabel}",
+        )
+        return resolvedRule
     }
 
     private fun normalizeMobileRulePriority(rules: MutableList<RuleConfig>) {
@@ -643,11 +698,16 @@ class MainActivity : AppCompatActivity() {
 
     private suspend fun currentDeviceState(): DeviceState {
         val connectionSnapshot = connectionStateResolver.resolveSnapshot()
-        return DeviceState(
+        val deviceState = DeviceState(
             connectionState = connectionSnapshot.connectionState,
             currentWifiSsid = connectionSnapshot.currentWifiSsid,
             connectedBluetoothDevices = bluetoothStateResolver.getConnectedDevices(),
         )
+        AppLog.d(
+            LOG_AREA,
+            "currentDeviceState: connection=${deviceState.connectionState} ssid=${deviceState.currentWifiSsid} bt=${deviceState.connectedBluetoothDevices.map { it.displayName }}",
+        )
+        return deviceState
     }
 
     private fun applyStatus(label: String) {
@@ -688,7 +748,10 @@ class MainActivity : AppCompatActivity() {
     private fun requestPermissionsIfNeeded(showGrantedMessage: Boolean = false) {
         val permissions = missingPermissions()
         if (permissions.isNotEmpty()) {
+            AppLog.i(LOG_AREA, "requestPermissionsIfNeeded: requesting standard permissions=$permissions")
             permissionsLauncher.launch(permissions.toTypedArray())
+        } else if (requestBackgroundLocationPermissionIfNeeded(fromExplicitAction = showGrantedMessage)) {
+            AppLog.i(LOG_AREA, "requestPermissionsIfNeeded: background location flow started")
         } else if (showGrantedMessage) {
             Toast.makeText(
                 this,
@@ -721,10 +784,33 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun requestBackgroundLocationPermissionIfNeeded(fromExplicitAction: Boolean): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return false
+        }
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            return false
+        }
+        if (checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+            return false
+        }
+
+        AppLog.w(LOG_AREA, "background location permission is missing")
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            AppLog.i(LOG_AREA, "background location requires settings navigation on Android 11+ explicit=$fromExplicitAction")
+            showPermissionSettingsDialog(R.string.dialog_background_permission_settings_message)
+            true
+        } else {
+            backgroundLocationPermissionLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+            true
+        }
+    }
+
     private fun shouldHandleInApp(permission: String): Boolean {
         return when (permission) {
             Manifest.permission.BLUETOOTH_CONNECT -> Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
             Manifest.permission.ACCESS_FINE_LOCATION -> true
+            Manifest.permission.ACCESS_BACKGROUND_LOCATION -> Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
             Manifest.permission.NEARBY_WIFI_DEVICES,
             Manifest.permission.POST_NOTIFICATIONS,
             -> Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
@@ -732,10 +818,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showPermissionSettingsDialog() {
+    private fun showPermissionSettingsDialog(messageResId: Int = R.string.dialog_permission_settings_message) {
+        AppLog.i(LOG_AREA, "showPermissionSettingsDialog")
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.dialog_permission_settings_title)
-            .setMessage(R.string.dialog_permission_settings_message)
+            .setMessage(messageResId)
             .setPositiveButton(R.string.action_open_settings) { _, _ ->
                 openAppSettings()
             }
@@ -744,6 +831,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openAppSettings() {
+        AppLog.i(LOG_AREA, "openAppSettings")
         startActivity(
             Intent(
                 Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
@@ -753,8 +841,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startMonitoringService() {
+        AppLog.i(LOG_AREA, "startMonitoringService")
         val intent = Intent(this, ConnectionMonitorService::class.java)
         ContextCompat.startForegroundService(this, intent)
+    }
+
+    companion object {
+        private const val LOG_AREA = "MainActivity"
+        const val EXTRA_SKIP_PERMISSION_REQUESTS = "com.example.wifi_volume.extra.SKIP_PERMISSION_REQUESTS"
+        const val EXTRA_SKIP_MONITORING_SERVICE_START = "com.example.wifi_volume.extra.SKIP_MONITORING_SERVICE_START"
+        const val TAB_VOLUME_SETTINGS = 0
+        const val TAB_GLOBAL_SETTINGS = 1
+        val DEFAULT_RULE_NAME_REGEX = Regex("^設定(\\d+)$")
     }
 
     private data class RuleCardViews(
@@ -776,10 +874,4 @@ class MainActivity : AppCompatActivity() {
     private data class AddConditionCandidate(
         val condition: RuleCondition,
     )
-
-    private companion object {
-        const val TAB_VOLUME_SETTINGS = 0
-        const val TAB_GLOBAL_SETTINGS = 1
-        val DEFAULT_RULE_NAME_REGEX = Regex("^設定(\\d+)$")
-    }
 }
